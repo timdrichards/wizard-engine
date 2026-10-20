@@ -183,4 +183,5 @@ Each step is a small PR with a check that shows it is done.
 4. For memory backends that observe stores: write-protect tracking in the signal handler, or a per-memory slow-path flag at the bounds check?
 5. Which form should the write-intent call take: `rangeForWrite` returning the range, or a `beforeWrite` notification before the existing range lookup? And is routing every write path through it (stores, bulk operations, atomics, host writes) acceptable?
 6. Is one core-declared extension slot on `Instance` acceptable?
-7. Is `undo` a good proof of concept, or would another client (such as call-optimizing opcodes) demonstrate the system better?
+7. A placement conflict stops the build, because placement runs during compile-time initialization. On native targets, though, `System.error` cannot run at compile time, so the build reports only `ExceptionInInitialization: !NotFoldable` with a stack through `Opcodes.checkPlaced`. The v3i build prints the real message (for example `demo.clash (extension demo): slot already used by unreachable`). Is there a better way to report a compile-time initialization failure with a message on native targets?
+8. Is `undo` a good proof of concept, or would another client (such as call-optimizing opcodes) demonstrate the system better?

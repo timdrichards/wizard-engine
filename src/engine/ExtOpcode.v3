@@ -1,0 +1,16 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// How an extension opcode gets its encoding.
+enum OpcodeClaim {
+	FIXED,		// exactly its prefix and code, e.g. an encoding set by a binary format
+	FLOATING	// any free one-byte slot; internal to the engine, never in input modules
+}
+
+// Describes one instruction contributed by an {InstrExtension}. In the opcode tables
+// it appears as {Opcode.EXT}, and {Opcodes.findExt} returns this descriptor.
+class ExtOpcode(prefix: u8, code: u16, mnemonic: string, imms: Array<ImmKind>, sig: SigDecl, claim: OpcodeClaim) {
+	var owner: InstrExtension;	// set when the opcode is placed
+	var placed_prefix: u8;		// the final encoding; for FLOATING it differs from {prefix, code}
+	var placed_code: u16;
+}

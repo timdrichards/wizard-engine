@@ -1,0 +1,9 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// The instruction set extensions built into this binary. This is the one place that
+// names them. To add one, list it here and build with {build.sh --ext=<name>}, which
+// compiles src/ext/<name>/. Their opcodes are placed when {Opcodes} is initialized.
+component RegisteredExtensions {
+	def all: Array<InstrExtension> = Array<InstrExtension>.new(0);
+}

@@ -11,7 +11,7 @@ HERE="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 . $HERE/../../common.bash regress-gen
 
 
-v3i $VIRGIL_LIB_UTIL/*.v3 $WIZENG_LOC/src/engine/*.v3 $WIZENG_LOC/src/util/*.v3 $WIZENG_LOC/src/engine/v3/*.v3 ./gen.main.v3 "$@" || exit $?
+v3i $VIRGIL_LIB_UTIL/*.v3 $WIZENG_LOC/src/engine/*.v3 $WIZENG_LOC/src/util/*.v3 $WIZENG_LOC/src/ext/Registered.v3 $WIZENG_LOC/src/engine/v3/*.v3 ./gen.main.v3 "$@" || exit $?
 
 TESTS=
 if [ $# != 0 ]; then

@@ -1,0 +1,12 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// Base class for an instruction set extension. An extension lives in src/ext/<name>/,
+// is compiled with {build.sh --ext=<name>}, and is listed in {RegisteredExtensions.all}
+// (src/ext/Registered.v3). See ideas/Extensions.md.
+class InstrExtension(name: string, help: string) {
+	// The instructions this extension contributes. Called once, when opcodes are placed.
+	def opcodes() -> Array<ExtOpcode> {
+		return Array<ExtOpcode>.new(0);
+	}
+}

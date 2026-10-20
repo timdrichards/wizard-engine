@@ -13,6 +13,7 @@ function exit_usage() {
     echo "  --no-wasm-run           exclude the Wasm run mode"
     echo "  --cbd                   include the canonical bytecode description interpreter"
     echo "  --object-model=<model>  select an object model from ${OBJECT_MODEL_DIRS}/"
+    echo "  --ext=<name>[,<name>]   include instruction set extensions from src/ext/<name>/"
     exit 1
 }
 
@@ -66,7 +67,7 @@ if [ ! -e "$VIRGIL_LIB/util/Vector.v3" ]; then
     exit 1
 fi
 
-ENGINE="src/engine/*.v3 src/engine/compression/*.v3 src/engine/objmodel/*.v3 src/util/*.v3 $VIRGIL_LIB/util/*.v3"
+ENGINE="src/engine/*.v3 src/engine/compression/*.v3 src/engine/objmodel/*.v3 src/util/*.v3 src/ext/Registered.v3 $VIRGIL_LIB/util/*.v3"
 MONITORS="src/monitors/*.v3"
 TEST_MONITORS="src/monitors/test/*.v3"
 DEBUG_MONITORS="src/monitors/debug/*.v3"
@@ -89,6 +90,7 @@ TARGET_CBD_FAST="src/engine/cbd/fast/*.v3"
 
 CBD=false
 OBJECT_MODEL=boxed
+EXTENSIONS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -114,6 +116,9 @@ while [[ $# -gt 0 ]]; do
 	--cbd)
 	    CBD=true
 	    ;;
+        --ext=*)
+            EXTENSIONS="${1#*=}"
+            ;;
         --object-model=*)
             OBJECT_MODEL="${1#*=}"
             ;;
@@ -138,6 +143,19 @@ if [ -z "$OBJECT_MODEL_SRC" ]; then
 fi
 
 ENGINE="$ENGINE $OBJECT_MODEL_SRC"
+
+# Instruction set extensions: compile src/ext/<name>/ for each name given to --ext.
+# Each one must also be listed in src/ext/Registered.v3.
+for ext in ${EXTENSIONS//,/ }; do
+    if [ ! -d "src/ext/$ext" ]; then
+        echo "Unknown extension \"$ext\". Found these:"
+        for dir in src/ext/*/; do
+            [ -d "$dir" ] && echo "  $(basename $dir)"
+        done
+        exit 1
+    fi
+    ENGINE="$ENGINE src/ext/$ext/*.v3"
+done
 
 PROGRAM=$1
 TARGET=$2

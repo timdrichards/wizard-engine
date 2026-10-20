@@ -93,6 +93,7 @@ def X_ = initGlobalOpTable();
 
 def initGlobalOpTable() {
 	for (op in Opcode) {
+		if (op == Opcode.EXT) continue; // placeholder for extension opcodes
 		match (op.prefix) {
 			0x00 => globalOpTable_00[op.code] = op;
 			0xFB => globalOpTable_FB[op.code] = op;

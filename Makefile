@@ -22,7 +22,7 @@ v3i: bin/wizeng.v3i bin/unittest.v3i
 WIZENG_BUILD_SH_ARGS ?=
 
 OBJECT_MODELS=src/engine/objmodel/*/*.v3
-ENGINE=src/engine/*.v3 src/engine/compression/*.v3 src/engine/v3/*.v3 src/util/*.v3 $(OBJECT_MODELS)
+ENGINE=src/engine/*.v3 src/engine/compression/*.v3 src/engine/v3/*.v3 src/util/*.v3 $(OBJECT_MODELS) src/ext/*.v3 $(wildcard src/ext/*/*.v3)
 MONITORS=src/monitors/*.v3 src/monitors/test/*.v3
 JIT=src/engine/compiler/*.v3
 X86_64=src/engine/native/*.v3 src/engine/x86-64/*.v3
