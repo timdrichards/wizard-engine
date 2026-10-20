@@ -126,7 +126,14 @@ Transactions change how every store behaves, which instruction hooks alone canno
 It becomes a per-memory choice: the default for ordinary memories, or an extension's `Memory` subclass for a memory the host marks (initially by a command-line option, with the module importing that memory).
 This mirrors the existing `--object-model` choice.
 
-Open question: fast-int and SPC generate inline stores, so a backend that must observe stores needs either write-protect tracking (the first store to a page faults and marks it dirty, so codegen does not change) or a per-memory flag at the bounds check that sends stores to a slow path.
+**Write intent.** A backend must be able to tell a store from a load, and today it cannot. In v3-int, loads and stores both call `decodeMemArgAndGetMemoryRange`, which calls `memory.range_oil_64(offset, index, size)`. The interpreter then reads or writes the returned `Range<byte>` directly (`doLoad`, `doStore`). So the seam needs one more core piece: a write-intent call that every write path uses. It could be a `rangeForWrite(offset, index, size)` returning the range, or a `beforeWrite(offset, size)` notification. The default implementation is the existing range lookup, so ordinary memories pay nothing. The write paths that must use it:
+
+- `doStore` and `doStoreLane`;
+- the bulk operations: `memory.fill`, `memory.copy` and `memory.init`;
+- atomic read-modify-write and store operations;
+- host functions that write guest memory, such as WASI's `fd_read`.
+
+**Fast tiers.** fast-int and SPC keep memory 0's base in a register (`mem0_base`) and generate inline loads and stores that never call into `Memory`. A backend that must observe stores therefore needs one of two things. One is write-protect tracking: the first store to a page faults and marks it dirty, so codegen does not change. The other is a per-memory flag at the bounds check that sends stores to a slow path through the write-intent call.
 
 ## Proof of concept: `undo`
 
@@ -160,7 +167,7 @@ Durable transactions later swap the in-memory undo log for a redo log on persist
 Each step is a small PR with a check that shows it is done.
 
 1. **Registry, no behavior change.** `ExtOpcode`, `Opcode.EXT`, the `0xFA` page, parallel page tables, the assignment pass and collision error, an empty `RegisteredExtensions`, and `--ext` in `build.sh`. *Done when* spec and unit tests are identical before and after, on x86-64-linux and v3i.
-2. **`undo` on v3-int.** Hooks, `BLOCK_LIKE`, `visitExt`, the memory-backend choice, `UndoWasmMemory`, the `Instance` slot. Tests in `test/ext/undo/` (nesting; rollback of mixed-width and unaligned stores; `memory.fill` and `memory.copy`; traps inside a block; validation errors). *Done when* they pass with `--ext=undo` and the same modules are rejected without it.
+2. **`undo` on v3-int.** Hooks, `BLOCK_LIKE`, `visitExt`, the memory-backend choice, the write-intent call on every v3-int write path, `UndoWasmMemory`, the `Instance` slot. Tests in `test/ext/undo/` (nesting; rollback of mixed-width and unaligned stores; `memory.fill` and `memory.copy`; traps inside a block; validation errors). *Done when* they pass with `--ext=undo` and the same modules are rejected without it.
 3. **`undo` in the fast tiers.** `runtime_EXT` fallback, SPC bailout, one hand-written `emitFastInt` handler, and the chosen approach to fast-tier stores. *Done when* results are identical across interpreter, fast-int and JIT modes.
 4. **Measure and review.** Lines in `src/ext/undo/` against lines changed in `src/engine/`, and overhead with the extension compiled in but unused.
 5. **Persistence library.** Bring the persistent-region and write-ahead-log code from the `pwregions` work under `src/ext/persist/`, built only with `--ext=persist`.
@@ -174,5 +181,6 @@ Each step is a small PR with a check that shows it is done.
 2. Is `canon_id` stable and global enough to name a type in an off-heap object?
 3. Should `--ext` be a `build.sh` flag like `--object-model`, or a separate main file per configuration?
 4. For memory backends that observe stores: write-protect tracking in the signal handler, or a per-memory slow-path flag at the bounds check?
-5. Is one core-declared extension slot on `Instance` acceptable?
-6. Is `undo` a good proof of concept, or would another client (such as call-optimizing opcodes) demonstrate the system better?
+5. Which form should the write-intent call take: `rangeForWrite` returning the range, or a `beforeWrite` notification before the existing range lookup? And is routing every write path through it (stores, bulk operations, atomics, host writes) acceptable?
+6. Is one core-declared extension slot on `Instance` acceptable?
+7. Is `undo` a good proof of concept, or would another client (such as call-optimizing opcodes) demonstrate the system better?
