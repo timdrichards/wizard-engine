@@ -1,0 +1,119 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// A proof-of-concept extension that demonstrates the extension system: undo checkpoints
+// for memory 0, a small in-memory version of a transaction.
+//
+//   undo.begin    (0xFA 0x00)  [] -> []     open a checkpoint
+//   undo.commit   (0xFA 0x01)  [] -> []     keep the writes since the innermost checkpoint, close it
+//   undo.rollback (0xFA 0x02)  [] -> []     restore every byte written since the innermost
+//                                           checkpoint, close it
+//   undo.depth    (0xFA 0x03)  [] -> [i32]  the number of open checkpoints
+//
+// Committing a nested checkpoint folds its writes into the enclosing one, so a later
+// rollback of the outer checkpoint undoes them too. commit and rollback with no open
+// checkpoint trap. Writes are seen through Memory's write observer, which the v3
+// interpreter's stores and the bulk memory operations call; the fast tiers do not yet.
+class UndoExtension extends InstrExtension {
+	def BEGIN	= ExtOpcode.new(0xFA, 0x00, "undo.begin", ImmSigs.NONE, SigCache.v_v, OpcodeClaim.FIXED);
+	def COMMIT	= ExtOpcode.new(0xFA, 0x01, "undo.commit", ImmSigs.NONE, SigCache.v_v, OpcodeClaim.FIXED);
+	def ROLLBACK	= ExtOpcode.new(0xFA, 0x02, "undo.rollback", ImmSigs.NONE, SigCache.v_v, OpcodeClaim.FIXED);
+	def DEPTH	= ExtOpcode.new(0xFA, 0x03, "undo.depth", ImmSigs.NONE, SigCache.v_i, OpcodeClaim.FIXED);
+
+	new() super("undo", "undo checkpoints for memory 0 (proof of concept)") { }
+
+	def opcodes() -> Array<ExtOpcode> {
+		return [BEGIN, COMMIT, ROLLBACK, DEPTH];
+	}
+	// Every undo instruction acts on memory 0, so the module must have one.
+	def validate(v: CodeValidator, op: ExtOpcode) -> bool {
+		if (v.module.memories.length == 0) {
+			v.err_atpc().OobIndex("memory", 0, 0);
+			return false;
+		}
+		return true;
+	}
+	def interpret(op: ExtOpcode, f: ExtFrame) -> TrapReason {
+		var log = UndoLogs.of(f.instance());
+		if (op == BEGIN) return log.begin();
+		if (op == COMMIT) return log.commit();
+		if (op == ROLLBACK) return log.rollback();
+		if (op == DEPTH) {
+			f.pushi(log.depth());
+			return TrapReason.NONE;
+		}
+		return TrapReason.INVALID_OPCODE;
+	}
+}
+
+// The undo log of one instance: the before-image of every write to memory 0 since the
+// outermost open checkpoint, and where each open checkpoint starts in that log.
+class UndoLog(memory: Memory) extends InstanceExtState {
+	def marks = Vector<int>.new();			// log position where each open checkpoint starts
+	def positions = Vector<u64>.new();		// memory offset of each before-image
+	def images = Vector<Array<byte>>.new();	// the bytes before each write
+	var observer: UndoObserver;		// created on first use
+
+	def begin() -> TrapReason {
+		if (observer == null) observer = UndoObserver.new(this);
+		if (marks.length == 0) memory.writeObserver = observer;
+		marks.put(positions.length);
+		return TrapReason.NONE;
+	}
+	def commit() -> TrapReason {
+		if (marks.length == 0) return TrapReason.ERROR; // no open checkpoint
+		marks.resize(marks.length - 1);
+		if (marks.length == 0) clear();
+		return TrapReason.NONE;
+	}
+	def rollback() -> TrapReason {
+		if (marks.length == 0) return TrapReason.ERROR; // no open checkpoint
+		var start = marks[marks.length - 1];
+		marks.resize(marks.length - 1);
+		// Restore newest first, so the oldest before-image of each byte wins.
+		for (i = positions.length - 1; i >= start; i--) {
+			var image = images[i];
+			var r = memory.range_ol_64(positions[i], u64.!(image.length));
+			if (r.ok()) for (j < image.length) r.result[j] = image[j];
+		}
+		positions.resize(start);
+		images.resize(start);
+		if (marks.length == 0) clear();
+		return TrapReason.NONE;
+	}
+	def depth() -> int {
+		return marks.length;
+	}
+	// Save the bytes [pos ..+ size] before they are written.
+	def record(pos: u64, size: u64) {
+		var r = memory.range_ol_64(pos, size);
+		if (!r.ok()) return;
+		positions.put(pos);
+		images.put(Ranges.dup(r.result));
+	}
+	private def clear() {
+		positions.resize(0);
+		images.resize(0);
+		memory.writeObserver = null;
+	}
+}
+
+// Records a before-image for every write to memory 0 while a checkpoint is open.
+class UndoObserver(log: UndoLog) extends MemoryWriteObserver {
+	def beforeWrite(memory: Memory, pos: u64, size: u64) {
+		log.record(pos, size);
+	}
+}
+
+component UndoLogs {
+	// Find the undo log of {instance}, creating it on first use.
+	def of(instance: Instance) -> UndoLog {
+		for (s = instance.ext_state; s != null; s = s.next) {
+			if (UndoLog.?(s)) return UndoLog.!(s);
+		}
+		var log = UndoLog.new(instance.memories[0]);
+		log.next = instance.ext_state;
+		instance.ext_state = log;
+		return log;
+	}
+}

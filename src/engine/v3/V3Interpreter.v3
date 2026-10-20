@@ -4,6 +4,7 @@
 class V3Interpreter extends WasmStack {
 	var instrTracer: InstrTracer;
 	def values = ArrayStack<Value>.new();	// storage of all WasmValues
+	private var extFrame: V3ExtFrame;		// created on the first extension instruction
 	var state_: StackState;
 	var cache: V3Frame;			// cache of all V3Frame objects (bottom of stack)
 	var frame: V3Frame;
@@ -1398,7 +1399,16 @@ class V3Interpreter extends WasmStack {
 				suspend_pc = frame.pc;
 			}
 			INVALID => trap(TrapReason.INVALID_OPCODE);
-			EXT => trap(TrapReason.INVALID_OPCODE); // no extension interpret hooks yet
+			EXT => {
+				var ext = codeptr.ext_opcode_at(pc);
+				if (ext == null) {
+					trap(TrapReason.INVALID_OPCODE);
+				} else {
+					if (extFrame == null) extFrame = V3ExtFrame.new(this);
+					var reason = ext.owner.interpret(ext, extFrame);
+					if (reason != TrapReason.NONE) trap(reason);
+				}
+			}
 // TODO: Uncomment the default case when there is an unimplemented instruction.
 // YAY!			_ => {
 //				trap(TrapReason.UNIMPLEMENTED);
@@ -1413,6 +1423,13 @@ class V3Interpreter extends WasmStack {
 		var index = popa(memory.decl.size);
 		return memory.range_oil_64(memarg.offset, index, size);
 	}
+	// Like {decodeMemArgAndGetMemoryRange}, for an access that writes memory.
+	def decodeMemArgAndGetMemoryRangeForWrite(size: byte) -> MaybeTrap<Range<byte>> {
+		var memarg = codeptr.read_MemArg();
+		var memory = frame.func.instance.memories[memarg.memory_index];
+		var index = popa(memory.decl.size);
+		return memory.write_range_oil_64(memarg.offset, index, size);
+	}
 	def doLoad<T>(accessor: MemoryAccessorOf<T>, push: T -> void) {
 		var t = decodeMemArgAndGetMemoryRange(accessor.size);
 		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
@@ -1425,12 +1442,12 @@ class V3Interpreter extends WasmStack {
 	}
 	def doAtomicStore<T>(accessor: MemoryAccessorOf<T>, pop: void -> T) {
 		var val = pop();
-		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		var t = decodeMemArgAndGetMemoryRangeForWrite(accessor.size);
 		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
 		accessor.write(t.result, val); // XXX: assumes "write" function is atomic
 	}
 	def doAtomicRmw<T>(accessor: MemoryAccessorOf<T>, val: T, op: (T, T) -> T, push: T -> void) {
-		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		var t = decodeMemArgAndGetMemoryRangeForWrite(accessor.size);
 		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
 		var prev = accessor.read(t.result); // XXX: assumes no real threads
 		var updated = op(prev, val);
@@ -1438,14 +1455,14 @@ class V3Interpreter extends WasmStack {
 		push(prev);
 	}
 	def doAtomicXchg<T>(accessor: MemoryAccessorOf<T>, replacement: T, push: T -> void) {
-		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		var t = decodeMemArgAndGetMemoryRangeForWrite(accessor.size);
 		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
 		var loaded = accessor.read(t.result); // XXX: assumes no real threads
 		accessor.write(t.result, replacement);
 		push(loaded);
 	}
 	def doAtomicCmpXchg<T>(accessor: MemoryAccessorOf<T>, replacement: T, expected: T, push: T -> void) {
-		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		var t = decodeMemArgAndGetMemoryRangeForWrite(accessor.size);
 		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
 		var loaded = accessor.read(t.result); // XXX: assumes no real threads
 		if (loaded == expected) accessor.write(t.result, replacement);
@@ -1598,13 +1615,13 @@ class V3Interpreter extends WasmStack {
 		push(Value.V128(low, high));
 	}
 	def doStore<T>(accessor: MemoryAccessorOf<T>, val: T) {
-		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		var t = decodeMemArgAndGetMemoryRangeForWrite(accessor.size);
 		if (t.reason != TrapReason.NONE) trap(t.reason);
 		else accessor.write(t.result, val);
 	}
 	def doStoreLane<T>(accessor: MemoryAccessorOf<T>, view: u64 -> T) {
 		var v = pops();
-		var t = decodeMemArgAndGetMemoryRange(accessor.size);
+		var t = decodeMemArgAndGetMemoryRangeForWrite(accessor.size);
 		var idx = codeptr.read1(); // get lane immediate
 		if (t.reason != TrapReason.NONE) return void(trap(t.reason));
 		// Extract lane
@@ -2231,4 +2248,11 @@ def make_new_v3_stack(func: Function) -> WasmStack {
 	var stack = V3Interpreter.new();
 	stack.reset(func);
 	return stack;
+}
+
+// The frame of a {V3Interpreter}, as an extension's {interpret} hook sees it.
+private class V3ExtFrame(i: V3Interpreter) extends ExtFrame {
+	def instance() -> Instance { return i.frame.func.instance; }
+	def pop() -> Value { return i.values.pop(); }
+	def push(v: Value) { i.values.push(v); }
 }

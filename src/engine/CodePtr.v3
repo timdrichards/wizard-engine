@@ -12,6 +12,17 @@ class CodePtr extends DataReader {
 		if (op != Opcode.INVALID) return op;
 		return if(Opcodes.isPrefix(b), Opcodes.find(b, read_uleb32()));
 	}
+	// Decode the extension opcode that starts at {start}, without moving the position.
+	// Returns null if the bytes there are not an extension opcode.
+	def ext_opcode_at(start: int) -> ExtOpcode {
+		var save = pos, r: ExtOpcode;
+		at(start);
+		var b = read1();
+		if (Opcodes.opcodes_no_prefix[b] == Opcode.EXT) r = Opcodes.ext_no_prefix[b];
+		else if (Opcodes.isPrefix(b)) r = Opcodes.findExt(b, read_uleb32());
+		at(save);
+		return r;
+	}
 	def read_opcode_but_skip_probe(func: FuncDecl) -> Opcode {
 		var pc = pos, b = read1();
 		if (b == InternalOpcode.PROBE.code || b == InternalOpcode.WHAMM_PROBE.code) b = func.orig_bytecode[pc];

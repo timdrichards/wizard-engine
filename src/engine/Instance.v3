@@ -80,6 +80,7 @@ class Instance(module: Module, imports: Array<Exportable>) {
 	def elems = Array<Array<Value>>.new(module.elems.length);
 	def dropped_data = Array<bool>.new(module.data.length);
 	def environments = Array<Instance>.new(module.environments.length);
+	var ext_state: InstanceExtState;  // per-instance state of extensions, as a chain
 
 	def getFunctionAsVal(func_index: int) -> Value.Ref {
 		return Value.Ref(functions[func_index]);
@@ -171,3 +172,9 @@ class Instance(module: Module, imports: Array<Exportable>) {
 	}
 }
 def EMPTY_BYTE_ARRAY: Array<byte> = [];
+
+// Per-instance state belonging to an extension. Extensions subclass it and find their
+// own entry in {Instance.ext_state} by type, so they add no fields to {Instance}.
+class InstanceExtState {
+	var next: InstanceExtState;
+}

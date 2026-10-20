@@ -1376,6 +1376,16 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					codeptr.at(opcode_pos);
 					err_atpc().InvalidOpcode(codeptr.read1(), codeptr.read_uleb32());
 				}
+				EXT => {
+					var ext = codeptr.ext_opcode_at(opcode_pos);
+					// Extension opcodes with immediates are not supported yet.
+					if (ext == null || ext.imms.length != 0) {
+						codeptr.at(opcode_pos);
+						return err_atpc().InvalidOpcode(codeptr.read1(), codeptr.read_uleb32());
+					}
+					checkSignature(ext.sig);
+					if (!ext.owner.validate(this, ext)) return;
+				}
 				_ => {
 					if (opcode.sig != null) {
 						checkSignature(opcode.sig);
