@@ -8,6 +8,7 @@ def X_ = void(
 	T("extopcode:collide_core", test_collide_core),
 	T("extopcode:two_byte", test_two_byte),
 	T("extopcode:no_extensions", test_no_extensions),
+	UnitTests.registerT("extopcode:", "rejected_without_ext", CodeValidatorTester.new, test_rejected_without_ext),
 	()
 );
 
@@ -70,4 +71,11 @@ def test_no_extensions(t: Tester) {
 		if (Opcodes.opcodes_no_prefix[b] == Opcode.EXT) return t.fail1("unexpected EXT at one-byte slot 0x%x", b);
 		if (Opcodes.findExt(0, b) != null) return t.fail1("unexpected extension opcode at 0x%x", b);
 	}
+}
+
+// Without extensions, the bytes of an extension opcode are just an invalid opcode.
+def test_rejected_without_ext(t: CodeValidatorTester) {
+	if (RegisteredExtensions.all.length != 0) return; // only meaningful for a build without extensions
+	t.sig(SigCache.v_v);
+	t.invalid(WasmError.INVALID_OPCODE, [0xFA, 0x00], 1);
 }
