@@ -72,6 +72,17 @@ class Memory(decl: MemoryDecl) extends Exportable {
 		return MaybeTrap(getReadWriteAlias64(pos, end), TrapReason.NONE);
 	}
 
+	// Install or remove the write observer. A memory whose writes do not all pass through
+	// {write_range_*} (a native memory, written directly by compiled code) overrides
+	// this to track writes another way, and reports them with {flushWriteTracking}.
+	def setWriteObserver(o: MemoryWriteObserver) {
+		writeObserver = o;
+	}
+	// Report to the observer any writes tracked but not yet reported.
+	def flushWriteTracking() { }
+	// Report pending writes, then start a new tracking period in which the next write
+	// to any byte is reported again.
+	def restartWriteTracking() { }
 	// Get a range of memory to write, [(offset + index) ..+ size], telling the write
 	// observer first. Every path that writes memory goes through these methods.
 	def write_range_oil_64(offset: u64, index: u64, size: u64) -> MaybeTrap<Range<byte>> {
@@ -225,4 +236,8 @@ component PrivateMemoryAccess {
 class MemoryWriteObserver {
 	// Called before the bytes [pos ..+ size] of {memory} are written. The range is in bounds.
 	def beforeWrite(memory: Memory, pos: u64, size: u64) { }
+	// Called with {image}, the bytes [pos ..+ image.length] of {memory} as they were before
+	// they were first written in the current tracking period. Used by memories that track
+	// writes by page.
+	def savedImage(memory: Memory, pos: u64, image: Range<byte>) { }
 }

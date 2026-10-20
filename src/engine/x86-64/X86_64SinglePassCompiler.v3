@@ -1292,6 +1292,8 @@ class X86_64SpcModuleCode extends X86_64SpcCode {
 					var p_rip = ucontext + ucontext_rip_offset;
 					p_rip.store<Pointer>(handler_ip);
 					return true;
+				} else if (signum == SIGSEGV && NativeMemoryTracking.handleWriteFault(addr)) {
+					return true; // first write to a tracked page: retry the store
 				} else {
 					// XXX: handle null derefs for wasm-gc opcodes
 					reason = TrapReason.MEMORY_OOB;

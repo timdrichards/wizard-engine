@@ -2253,6 +2253,6 @@ def make_new_v3_stack(func: Function) -> WasmStack {
 // The frame of a {V3Interpreter}, as an extension's {interpret} hook sees it.
 private class V3ExtFrame(i: V3Interpreter) extends ExtFrame {
 	def instance() -> Instance { return i.frame.func.instance; }
-	def pop() -> Value { return i.values.pop(); }
+	def pop(t: ValueType) -> Value { return i.values.pop(); }
 	def push(v: Value) { i.values.push(v); }
 }

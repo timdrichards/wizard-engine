@@ -144,6 +144,7 @@ class X86_64InterpreterCode extends RiUserCode {
 					pip.store<Pointer>(handler_ip);
 					return true;
 				}
+				if (signum == SIGSEGV && NativeMemoryTracking.handleWriteFault(addr)) return true; // retry the store
 				pip.store<Pointer>(start + header.oobMemoryHandlerOffset);
 				return true;
 			}
@@ -942,6 +943,7 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		genFloatMinAndMax();
 		genSimdInstrs();
 		genMisc();
+		genExtHandlers();
 		if (!FeatureDisable.globalProbes) genGlobalProbeSupport();
 	}
 	def writeDispatchEntry(ref: IcCodeRef, opcode: int, offset: int) {
@@ -4037,26 +4039,29 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 	}
 	// Patch the dispatch table for the given opcode to go to the given position.
 	def patchDispatchTable(opcode: Opcode, pos: int) {
-		if (opcode.prefix == 0) {
-			if (opcode.code > 255) {
+		patchDispatchTableAt(opcode.prefix, opcode.code, pos);
+	}
+	def patchDispatchTableAt(opcode_prefix: byte, opcode_code: u16, pos: int) {
+		if (opcode_prefix == 0) {
+			if (opcode_code > 255) {
 				fatal("prefix 0 opcode > 255");
 			}
 			var ref0 = dispatchTables[0].1;		// main dispatch table
-			writeDispatchEntry(ref0, opcode.code, pos);
+			writeDispatchEntry(ref0, opcode_code, pos);
 			w.atEnd();
 			return;
 		}
 		// find closest matching info
 		var refsndary: IcCodeRef;
 		var refleb: IcCodeRef;
-		if (opcode.code > 0x3FFF) {
+		if (opcode_code > 0x3FFF) {
 			fatal("opcode > 0x3FFF");
 		}
-		var lower = opcode.code & 0x7F;		// subpage number when appropriate
-		var upper = opcode.code >> 7;
+		var lower = opcode_code & 0x7F;		// subpage number when appropriate
+		var upper = opcode_code >> 7;
 		for (t in dispatchTables) {
 			var prefix = t.0;
-			if (prefix != opcode.prefix) continue;
+			if (prefix != opcode_prefix) continue;
 			refsndary = t.1;	// secondary table for this prefix
 			refleb = t.2;		// LEB table for this prefix
 			if (t.3 == lower) {
@@ -4077,20 +4082,36 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		if (refsndary == null) {
 			fatal("no dispatch table found for prefix");
 		}
-		if (opcode.code > 255) {
+		if (opcode_code > 255) {
 			fatal("opcode > 255 but no matching subpage");
 		}
 		// here if prefix and not a subpage
-		if (opcode.code < 128) {
+		if (opcode_code < 128) {
 			// minimal encoding goes to secondary
 			// other encodings will redirect here
-			writeDispatchEntry(refsndary, opcode.code, pos);
+			writeDispatchEntry(refsndary, opcode_code, pos);
 		} else {
 			// all encodings go to LEB table
-			writeDispatchEntry(refleb, opcode.code, pos);
+			writeDispatchEntry(refleb, opcode_code, pos);
 		}
 		w.atEnd();
 		return;
+	}
+	// Handlers for extension opcodes (see InstrExtension.v3): each calls runtime_EXT,
+	// which runs the extension's interpret hook. Nothing is generated without extensions.
+	def genExtHandlers() {
+		for (ext in Opcodes.ext_opcodes) {
+			if (FastIntTuning.handlerAlignment > 1) w.align(FastIntTuning.handlerAlignment);
+			patchDispatchTableAt(ext.placed_prefix, ext.placed_code, w.atEnd().pos);
+			if (ext.placed_prefix == 0) computeCurIpFromIp(-1); // prefixed: set by the prefix stub
+			computePcFromCurIp();
+			masm.emit_get_curstack(xenv.tmp1);
+			saveCallerIVars();
+			asm.movq_r_m(r_tmp0, m_wasm_func);
+			callRuntime(refRuntimeCall(X86_64RT.runtime_EXT), [r_tmp1, r_tmp0, r_curpc], true);
+			restoreCallerIVars();
+			endHandler();
+		}
 	}
 	// Generate the out-of-line LEB decoding code.
 	def genOutOfLineLEBs() { // XXX: use a separate out-of-line assembler on the end of the buffer

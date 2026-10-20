@@ -68,6 +68,14 @@ component X86_64Runtime {
 		if (ret != null) return ThrowResult.Unhandled.!(stack.throw(ret)).thrown;
 		return ret;
 	}
+	// Runs the extension opcode at {pc} in {func} through its extension's interpret hook.
+	def runtime_EXT(stack: NativeStack, func: WasmFunction, pc: int) -> Throwable {
+		var ext = CodePtr.new(func.decl.cur_bytecode).ext_opcode_at(pc);
+		if (ext == null) return stack.trap(TrapReason.INVALID_OPCODE);
+		var reason = ext.owner.interpret(ext, NativeExtFrame.new(stack, func.instance));
+		if (reason != TrapReason.NONE) return stack.trap(reason);
+		return null;
+	}
 	def runtime_GET_LOCAL_PROBE(func: WasmFunction, pc: int) -> Probe {
 		return func.instance.module.probes[func.decl.func_index][pc];
 	}
@@ -248,4 +256,13 @@ component X86_64Runtime {
 		var expected = SigDecl.!(instance.heaptypes[sig_index]);	// cast not strictly necessary; for debugging
 		return if(ValueTypes.isAssignableHeap(func.sig, expected), func, null);
 	}
+}
+
+// The frame of the fast interpreter, as an extension's {interpret} hook sees it.
+private class NativeExtFrame(stack: NativeStack, inst: Instance) extends ExtFrame {
+	def instance() -> Instance { return inst; }
+	def pop(t: ValueType) -> Value { return stack.pop(t); }
+	def push(v: Value) { stack.push(v); }
+	def popi() -> i32 { return stack.popi(); }
+	def pushi(v: i32) { stack.pushi(v); }
 }

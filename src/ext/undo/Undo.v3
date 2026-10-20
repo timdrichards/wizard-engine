@@ -12,8 +12,9 @@
 //
 // Committing a nested checkpoint folds its writes into the enclosing one, so a later
 // rollback of the outer checkpoint undoes them too. commit and rollback with no open
-// checkpoint trap. Writes are seen through Memory's write observer, which the v3
-// interpreter's stores and the bulk memory operations call; the fast tiers do not yet.
+// checkpoint trap. Writes are seen through Memory's write observer: per write in the v3
+// interpreter, and per page on native memories, where compiled code and the fast
+// interpreter store directly and page protection catches the first write to each page.
 class UndoExtension extends InstrExtension {
 	def BEGIN	= ExtOpcode.new(0xFA, 0x00, "undo.begin", ImmSigs.NONE, SigCache.v_v, OpcodeClaim.FIXED);
 	def COMMIT	= ExtOpcode.new(0xFA, 0x01, "undo.commit", ImmSigs.NONE, SigCache.v_v, OpcodeClaim.FIXED);
@@ -46,28 +47,34 @@ class UndoExtension extends InstrExtension {
 	}
 }
 
-// The undo log of one instance: the before-image of every write to memory 0 since the
-// outermost open checkpoint, and where each open checkpoint starts in that log.
+// The undo log of one instance: before-images of memory 0 since the outermost open
+// checkpoint, and where each open checkpoint starts in that log. The memory reports
+// before-images either per write (the v3 interpreter) or per page (native memories,
+// which track writes from compiled code by page protection).
 class UndoLog(memory: Memory) extends InstanceExtState {
 	def marks = Vector<int>.new();			// log position where each open checkpoint starts
 	def positions = Vector<u64>.new();		// memory offset of each before-image
-	def images = Vector<Array<byte>>.new();	// the bytes before each write
-	var observer: UndoObserver;		// created on first use
+	def images = Vector<Array<byte>>.new();	// the bytes before the write
+	var observer: UndoObserver;			// created on first use
 
 	def begin() -> TrapReason {
 		if (observer == null) observer = UndoObserver.new(this);
-		if (marks.length == 0) memory.writeObserver = observer;
+		if (marks.length == 0) memory.setWriteObserver(observer);
+		else memory.restartWriteTracking(); // the next write to any page belongs to this checkpoint
 		marks.put(positions.length);
 		return TrapReason.NONE;
 	}
 	def commit() -> TrapReason {
 		if (marks.length == 0) return TrapReason.ERROR; // no open checkpoint
+		memory.flushWriteTracking();
 		marks.resize(marks.length - 1);
 		if (marks.length == 0) clear();
 		return TrapReason.NONE;
 	}
 	def rollback() -> TrapReason {
 		if (marks.length == 0) return TrapReason.ERROR; // no open checkpoint
+		// Stop tracking first: it reports pending images, and restoring must not be tracked.
+		memory.setWriteObserver(null);
 		var start = marks[marks.length - 1];
 		marks.resize(marks.length - 1);
 		// Restore newest first, so the oldest before-image of each byte wins.
@@ -78,7 +85,8 @@ class UndoLog(memory: Memory) extends InstanceExtState {
 		}
 		positions.resize(start);
 		images.resize(start);
-		if (marks.length == 0) clear();
+		if (marks.length > 0) memory.setWriteObserver(observer);
+		else clear();
 		return TrapReason.NONE;
 	}
 	def depth() -> int {
@@ -87,21 +95,26 @@ class UndoLog(memory: Memory) extends InstanceExtState {
 	// Save the bytes [pos ..+ size] before they are written.
 	def record(pos: u64, size: u64) {
 		var r = memory.range_ol_64(pos, size);
-		if (!r.ok()) return;
+		if (r.ok()) save(pos, r.result);
+	}
+	def save(pos: u64, image: Range<byte>) {
 		positions.put(pos);
-		images.put(Ranges.dup(r.result));
+		images.put(Ranges.dup(image));
 	}
 	private def clear() {
 		positions.resize(0);
 		images.resize(0);
-		memory.writeObserver = null;
+		memory.setWriteObserver(null);
 	}
 }
 
-// Records a before-image for every write to memory 0 while a checkpoint is open.
+// Records before-images of memory 0 while a checkpoint is open.
 class UndoObserver(log: UndoLog) extends MemoryWriteObserver {
 	def beforeWrite(memory: Memory, pos: u64, size: u64) {
 		log.record(pos, size);
+	}
+	def savedImage(memory: Memory, pos: u64, image: Range<byte>) {
+		log.save(pos, image);
 	}
 }
 

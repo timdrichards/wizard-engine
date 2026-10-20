@@ -29,8 +29,8 @@ class InstrExtension(name: string, help: string) {
 // provides one.
 class ExtFrame {
 	def instance() -> Instance;
-	def pop() -> Value;
+	def pop(t: ValueType) -> Value;
 	def push(v: Value);
-	def popi() -> i32 { return Values.unbox_i(pop()); }
+	def popi() -> i32 { return Values.unbox_i(pop(ValueType.I32)); }
 	def pushi(v: i32) { push(Value.I32(u32.view(v))); }
 }

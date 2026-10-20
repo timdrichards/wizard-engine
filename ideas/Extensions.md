@@ -103,7 +103,9 @@ Run during component initialization, so at build time, before `Opcodes` builds i
 | Validator | `validate` | required |
 | v3-int | `interpret` with `ExtFrame` | required |
 | fast-int | `emitFastInt` handler in the dispatch table | generic handler calls `runtime_EXT(stack, func, pc)`, which runs `interpret` (modeled on `runtime_PROBE_instr`) |
-| SPC | `emitSpc` | existing `bailout`; the function stays in the interpreter (to verify) |
+| SPC | `emitSpc` | existing `bailout`: in the `jit`, `lazy` and `dyn` strategies the function falls back to the interpreter; the `spc` strategy (no fallback) rejects the module |
+
+As built in step 3, fast-int binds one small handler per placed extension opcode (`genExtHandlers`, using `patchDispatchTableAt(prefix, code, pos)`, a variant of `patchDispatchTable` that takes an encoding instead of an `Opcode`). Each handler saves the interpreter state, calls `runtime_EXT`, restores it and dispatches the next instruction. With no extensions, no handler is generated. `emitFastInt` and `emitSpc` are not built yet.
 
 `ExtFrame` is `FrameAccessor` plus `pop`, `push` and an immediate reader.
 An extension can ship with only `validate` and `interpret` and behave correctly in every tier.
@@ -149,6 +151,15 @@ This mirrors the existing `--object-model` choice.
 
 **Fast tiers.** fast-int and SPC keep memory 0's base in a register (`mem0_base`) and generate inline loads and stores that never call into `Memory`. A backend that must observe stores therefore needs one of two things. One is write-protect tracking: the first store to a page faults and marks it dirty, so codegen does not change. The other is a per-memory flag at the bounds check that sends stores to a slow path through the write-intent call.
 
+**As built in step 3: write-protect tracking.** It costs nothing when no observer is installed and changes no generated code. While an observer is installed on a `NativeWasmMemory`:
+
+- the memory's pages are made read-only (`Mmap.protect`, 4 KiB OS pages);
+- the first store to a page from fast-int or SPC code faults. Both signal handlers (`X86_64InterpreterCode.handleSignal` and `X86_64SpcModuleCode.handleSignal`) first ask `NativeMemoryTracking.handleWriteFault(addr)`. For a tracked page, it copies the page into a buffer allocated when tracking started (no allocation in the signal handler), makes the page writable and returns true, and the store is retried;
+- writes through `write_range_*` (the runtime's bulk operations) save and open their pages directly, so Virgil code never faults;
+- `flushWriteTracking()` later reports the saved pages to the observer as `savedImage(memory, pos, image)`, outside the signal handler, and `restartWriteTracking()` makes every page read-only again so the next first write to each page is reported.
+
+Not covered: pages added by `memory.grow` while tracking, memories whose size is not a multiple of 4 KiB (custom page sizes), and host functions that write guest memory without `write_range_*`.
+
 ## Proof of concept: `undo`
 
 Built with `--ext=undo` (`src/ext/undo/Undo.v3`, tests in `test/ext/undo/`). A volatile, in-memory miniature of a transaction:
@@ -171,7 +182,7 @@ Committing a nested checkpoint folds its writes into the enclosing one. `commit`
 | `visitExt` and `accept` | the default `accept`, so every visitor sees `visitExt` |
 | Per-instance state | `UndoLog` in the `Instance.ext_state` chain |
 | Memory write observer | `UndoObserver` records the before-image of every write, byte-exact, so mixed-width and unaligned stores and bulk operations roll back correctly |
-| Tier fallbacks | v3-int now; fast-int via `runtime_EXT` and SPC bailout in step 3 |
+| Tier fallbacks | v3-int; fast-int via `runtime_EXT`; SPC bailout, so a function using `undo` stays in the interpreter while its callees are compiled |
 | Build-time opt-in | without `--ext=undo`, `0xFA 0x00` fails validation as an invalid opcode |
 
 **Why not `undo.block ... end`.** The first version of this design used a structured `undo.block` whose matching `end` would commit. Doing that needs two things the core does not have: a way for an extension to run code at a particular `end` (the interpreter executes `end` without knowing which block it closes), and a rule for branches that leave the block without reaching its `end`. Both are real design questions for transactions, so `BLOCK_LIKE` is deferred to its own step, and `undo` uses unstructured `begin`/`commit`/`rollback`.
@@ -184,8 +195,8 @@ Each step is a small PR with a check that shows it is done.
 
 1. **Registry, no behavior change.** `ExtOpcode`, `Opcode.EXT`, the `0xFA` page, parallel page tables, the assignment pass and collision error, an empty `RegisteredExtensions`, and `--ext` in `build.sh`. *Done when* spec and unit tests are identical before and after, on x86-64-linux and v3i.
 2. **`undo` on v3-int** (done). The `validate`, `interpret` and `accept` hooks, `ExtFrame`, `visitExt`, the memory write observer and write-intent ranges on every v3-int write path, the `Instance` state chain, the generated registration list, and `test/ext/undo/`. 13 execution tests (nesting, commit and rollback, mixed-width and unaligned stores, `memory.fill`, `memory.copy`, traps) and a validation test pass on v3i with `--ext=undo`; disabling the before-image log makes exactly the 6 rollback tests fail. Without the flag, `0xFA 0x00` is an invalid opcode. Until step 3, the undo tests register only on targets whose only test tier is the v3 interpreter.
-3. **`undo` in the fast tiers.** `runtime_EXT` fallback, SPC bailout, one hand-written `emitFastInt` handler, and the chosen approach to fast-tier stores. *Done when* results are identical across interpreter, fast-int and JIT modes.
-4. **Measure and review.** Lines in `src/ext/undo/` against lines changed in `src/engine/`, and overhead with the extension compiled in but unused.
+3. **`undo` in the fast tiers** (done). `runtime_EXT` and a fast-int handler per extension opcode; SPC bailout with interpreter fallback; write-protect tracking for fast-tier stores; `ExtFrame` pops take a type, since the native value stack needs one. All 16 undo tests pass on all four x86-64-linux test tiers (`int`, `jit`, `dyn`, `lazy`), including stores made by a compiled callee and stores on two OS pages; with the page save disabled, exactly the 6 tests whose stores come from Wasm code fail on every tier. Not built: a hand-written `emitFastInt` handler, which is a speed demonstration and moves to step 4.
+4. **Measure and review.** Lines in `src/ext/undo/` against lines changed in `src/engine/`, overhead with the extension compiled in but unused, and one hand-written `emitFastInt` handler (for `undo.depth`) to show an extension adding speed without core changes.
 5. **Persistence library.** Bring the persistent-region and write-ahead-log code from the `pwregions` work under `src/ext/persist/`, built only with `--ext=persist`.
 6. **`PersistentWasmMemory`.** The `undo` design with a durable backend: a RAM working copy (the write-ahead log is redo-only), byte-exact dirty lines, commit through the log, recovery at instantiation.
 7. **Wasm Simple Transactions** on the registry, with their real encodings.
@@ -196,7 +207,7 @@ Each step is a small PR with a check that shows it is done.
 1. Is a separate prefix page (`0xFA`) for extensions the right interim, or should extension opcodes share existing pages?
 2. Is `canon_id` stable and global enough to name a type in an off-heap object?
 3. Is generating the registration list from `--ext` and each extension's `extension.txt` acceptable, or would a separate main file per configuration be better?
-4. For memory backends that observe stores: write-protect tracking in the signal handler, or a per-memory slow-path flag at the bounds check?
+4. Step 3 chose write-protect tracking for fast-tier stores (no codegen change, no cost when unused), with a hook in both signal handlers ahead of the out-of-bounds trap. Is that acceptable, or would a per-memory slow-path flag at the bounds check fit Wizard better?
 5. Step 2 combines both forms: `write_range_*` returns the range and calls the write observer first. Is that acceptable, and is routing every write path through it (stores, bulk operations, atomics, host writes) acceptable?
 6. Is one core-declared extension slot on `Instance` acceptable?
 7. A placement conflict stops the build, because placement runs during compile-time initialization. On native targets, though, `System.error` cannot run at compile time, so the build reports only `ExceptionInInitialization: !NotFoldable` with a stack through `Opcodes.checkPlaced`. The v3i build prints the real message (for example `demo.clash (extension demo): slot already used by unreachable`). Is there a better way to report a compile-time initialization failure with a message on native targets?
