@@ -196,11 +196,34 @@ Each step is a small PR with a check that shows it is done.
 1. **Registry, no behavior change.** `ExtOpcode`, `Opcode.EXT`, the `0xFA` page, parallel page tables, the assignment pass and collision error, an empty `RegisteredExtensions`, and `--ext` in `build.sh`. *Done when* spec and unit tests are identical before and after, on x86-64-linux and v3i.
 2. **`undo` on v3-int** (done). The `validate`, `interpret` and `accept` hooks, `ExtFrame`, `visitExt`, the memory write observer and write-intent ranges on every v3-int write path, the `Instance` state chain, the generated registration list, and `test/ext/undo/`. 13 execution tests (nesting, commit and rollback, mixed-width and unaligned stores, `memory.fill`, `memory.copy`, traps) and a validation test pass on v3i with `--ext=undo`; disabling the before-image log makes exactly the 6 rollback tests fail. Without the flag, `0xFA 0x00` is an invalid opcode. Until step 3, the undo tests register only on targets whose only test tier is the v3 interpreter.
 3. **`undo` in the fast tiers** (done). `runtime_EXT` and a fast-int handler per extension opcode; SPC bailout with interpreter fallback; write-protect tracking for fast-tier stores; `ExtFrame` pops take a type, since the native value stack needs one. All 16 undo tests pass on all four x86-64-linux test tiers (`int`, `jit`, `dyn`, `lazy`), including stores made by a compiled callee and stores on two OS pages; with the page save disabled, exactly the 6 tests whose stores come from Wasm code fail on every tier. Not built: a hand-written `emitFastInt` handler, which is a speed demonstration and moves to step 4.
-4. **Measure and review.** Lines in `src/ext/undo/` against lines changed in `src/engine/`, overhead with the extension compiled in but unused, and one hand-written `emitFastInt` handler (for `undo.depth`) to show an extension adding speed without core changes.
+4. **Measure and review** (done; see Results). The hand-written `emitFastInt` handler was dropped: it needs a target-specific way to register code, which is open question 9.
 5. **Persistence library.** Bring the persistent-region and write-ahead-log code from the `pwregions` work under `src/ext/persist/`, built only with `--ext=persist`.
 6. **`PersistentWasmMemory`.** The `undo` design with a durable backend: a RAM working copy (the write-ahead log is redo-only), byte-exact dirty lines, commit through the log, recovery at instantiation.
 7. **Wasm Simple Transactions** on the registry, with their real encodings.
 8. **After the stable language revision:** extensible enums replace `ExtOpcode`, weak maps replace side tables.
+
+## Results (step 4, 2026-10-20)
+
+**Code.** The branch changes 28 files (+1,094/−29 lines, including this document). The core gained 459 lines in `src/engine`, `src/util` and `src/monitors` (26 removed). That is a one-time cost for the seams: `Opcodes.v3` (131), `NativeMemory.v3` (112, write tracking), `Memory.v3` (44), `InstrExtension.v3` (36), `X86_64Interpreter.v3` (32), `V3Interpreter.v3` (31), and small changes elsewhere. `undo` itself is 279 lines in `src/ext/undo/` and `test/ext/undo/` and needed no further core changes.
+
+**Cost when unused.** Five Virgil benchmarks (`bench/` in the Virgil repo: BubbleSort, Fannkuch, MatrixMult, DeltaBlue, Mandelbrot) were compiled to Wasm/WASI and run on three `wizeng` builds: default, with an empty extension that claims no opcodes, and with `--ext=undo`. None of the benchmarks uses an extension. Each figure is the median of 5 interleaved runs on the large inputs, in an x86-64 Linux container on Apple silicon (Rosetta).
+
+| benchmark | mode | default (s) | empty extension | `--ext=undo` |
+|---|---|---|---|---|
+| BubbleSort | int | 379.13 | +0.3% | −24.8% |
+| BubbleSort | jit | 6.19 | −0.5% | +0.3% |
+| Fannkuch | int | 16.17 | +0.4% | −23.8% |
+| Fannkuch | jit | 0.51 | −2.0% | −2.0% |
+| MatrixMult | int | 19.73 | +0.7% | −24.0% |
+| MatrixMult | jit | 0.40 | −2.5% | +0.0% |
+| DeltaBlue | int | 135.21 | +0.3% | −26.2% |
+| DeltaBlue | jit | 7.21 | +2.4% | −3.3% |
+| Mandelbrot | int | 3.95 | −0.3% | −19.0% |
+| Mandelbrot | jit | 0.36 | −2.8% | +2.8% |
+
+- An extension compiled in but unused costs nothing measurable: the empty extension is within ±0.7% of default in the interpreter, and all `jit` results are within ±3% (noise at these sizes).
+- The `--ext=undo` interpreter is 19–26% *faster* on every benchmark. That cannot come from `undo`, whose code never runs here. The visible difference is that `undo` claims the `0xFA` page, which adds a dispatch table and four handlers and so moves the fast interpreter's code. This is most likely a code-layout effect on indirect dispatch, possibly amplified by Rosetta. It needs measuring on native x86-64 hardware before anything is read into it, and it is a hint that fast-int's handler layout matters more than expected.
+- Not measured: the per-store null check the v3 interpreter now makes for the write observer (the v3 target is not a performance target), and the cost of write tracking itself while a checkpoint is open (one page fault and a 4 KiB copy per page first written in each checkpoint).
 
 ## Open questions
 
@@ -212,4 +235,6 @@ Each step is a small PR with a check that shows it is done.
 6. Is one core-declared extension slot on `Instance` acceptable?
 7. A placement conflict stops the build, because placement runs during compile-time initialization. On native targets, though, `System.error` cannot run at compile time, so the build reports only `ExceptionInInitialization: !NotFoldable` with a stack through `Opcodes.checkPlaced`. The v3i build prints the real message (for example `demo.clash (extension demo): slot already used by unreachable`). Is there a better way to report a compile-time initialization failure with a message on native targets?
 8. How should structured extension instructions (`BLOCK_LIKE`) work: how does an extension run code at the `end` that closes its block, and what happens on a branch that leaves the block without reaching `end`?
-9. Is `undo` a good proof of concept, or would another client (such as call-optimizing opcodes) demonstrate the system better?
+9. How should an extension supply target-specific code such as an `emitFastInt` handler? `InstrExtension` must stay target-neutral (the v3i build does not compile `src/engine/x86-64`), so this needs a second, per-target registration list, for example generated by `build.sh` from `src/ext/<name>/x86-64-linux/`.
+10. The `--ext=undo` fast interpreter ran 19–26% faster on benchmarks that never use it, while an empty extension changed nothing. Is that a known sensitivity of fast-int to code layout, and is it worth investigating on native hardware?
+11. Is `undo` a good proof of concept, or would another client (such as call-optimizing opcodes) demonstrate the system better?
