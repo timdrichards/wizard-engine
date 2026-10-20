@@ -239,6 +239,7 @@ def test_opcodes_all(t: WhammTester) {
 	var buf = StringBuilder.new();
 	for (op in Opcode) {
 		if (op == Opcode.INVALID) continue;
+		if (op == Opcode.EXT) continue;
 		if (op == Opcode.SELECT_T) continue;
 		buf.reset();
 		buf.puts("wasm:opcode:");

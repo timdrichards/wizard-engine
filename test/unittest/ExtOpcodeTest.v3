@@ -1,0 +1,73 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+def T = UnitTests.register;
+def X_ = void(
+	T("extopcode:put", test_put),
+	T("extopcode:collide_ext", test_collide_ext),
+	T("extopcode:collide_core", test_collide_core),
+	T("extopcode:two_byte", test_two_byte),
+	T("extopcode:no_extensions", test_no_extensions),
+	()
+);
+
+def newOp(prefix: u8, code: u16, mnemonic: string) -> ExtOpcode {
+	return ExtOpcode.new(prefix, code, mnemonic, ImmSigs.NONE, SigCache.v_v, OpcodeClaim.FIXED);
+}
+
+// An extension opcode placed on a fresh page reads back as Opcode.EXT with its descriptor.
+def test_put(t: Tester) {
+	var page = OpcodePage.new(0xFA);
+	var op = newOp(0xFA, 0x01, "test.one");
+	var used = page.putExt(op, 0x01);
+	if (used != null) return t.fail1("expected free slot, but used by %s", used);
+	if (!page.isValid(0x01)) return t.fail("expected slot 0x01 to be valid");
+	if (page[0x01] != Opcode.EXT) return t.fail1("expected EXT, got %s", page[0x01].name);
+	if (page.getExt(0x01) != op) return t.fail("expected getExt to return the placed opcode");
+	if (page.getExt(0x02) != null) return t.fail("expected no extension opcode at 0x02");
+	if (page.isValid(0x02)) return t.fail("expected slot 0x02 to stay invalid");
+}
+
+// A second claim on the same slot is refused and names the first claimant.
+def test_collide_ext(t: Tester) {
+	var page = OpcodePage.new(0xFA);
+	var first = newOp(0xFA, 0x05, "test.first");
+	var second = newOp(0xFA, 0x05, "test.second");
+	page.putExt(first, 0x05);
+	var used = page.putExt(second, 0x05);
+	t.assert_string("test.first", used);
+	if (page.getExt(0x05) != first) t.fail("expected the first opcode to keep its slot");
+}
+
+// A claim on a slot held by a core opcode is refused and names the core opcode.
+def test_collide_core(t: Tester) {
+	var page = OpcodePage.new(0xFC);
+	page.put(Opcode.I64_ADD128);
+	var used = page.putExt(newOp(0xFC, Opcode.I64_ADD128.code, "test.clash"), Opcode.I64_ADD128.code);
+	t.assert_string("i64.add128", used);
+	if (page[Opcode.I64_ADD128.code] != Opcode.I64_ADD128) t.fail("expected the core opcode to keep its slot");
+}
+
+// Codes above 0xFF go to a subpage, as core opcodes do, and need full LEB decoding.
+def test_two_byte(t: Tester) {
+	var page = OpcodePage.new(0xFA);
+	var op = newOp(0xFA, 0x0123, "test.wide");
+	var used = page.putExt(op, 0x0123);
+	if (used != null) return t.fail1("expected free slot, but used by %s", used);
+	if (page.getExt(0x0123) != op) return t.fail("expected getExt to find the opcode on its subpage");
+	if (page.getExt(0x0124) != null) return t.fail("expected no extension opcode at 0x0124");
+	if (page.getExt(0x0223) != null) return t.fail("expected no extension opcode on a missing subpage");
+	if (page.oneByte) t.fail("expected the page to need full LEB decoding");
+}
+
+// With no registered extensions, the opcode tables are exactly the core ones.
+def test_no_extensions(t: Tester) {
+	if (RegisteredExtensions.all.length != 0) return; // only meaningful for a build without extensions
+	if (Opcodes.page_by_prefix[Opcodes.EXT_PREFIX] != null) return t.fail("expected no extension prefix page");
+	if (Opcodes.code_pages.length != 4) return t.fail1("expected 4 code pages, got %d", Opcodes.code_pages.length);
+	for (i < 256) {
+		var b = byte.view(i);
+		if (Opcodes.opcodes_no_prefix[b] == Opcode.EXT) return t.fail1("unexpected EXT at one-byte slot 0x%x", b);
+		if (Opcodes.findExt(0, b) != null) return t.fail1("unexpected extension opcode at 0x%x", b);
+	}
+}

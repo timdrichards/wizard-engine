@@ -1398,6 +1398,7 @@ class V3Interpreter extends WasmStack {
 				suspend_pc = frame.pc;
 			}
 			INVALID => trap(TrapReason.INVALID_OPCODE);
+			EXT => trap(TrapReason.INVALID_OPCODE); // no extension interpret hooks yet
 // TODO: Uncomment the default case when there is an unimplemented instruction.
 // YAY!			_ => {
 //				trap(TrapReason.UNIMPLEMENTED);

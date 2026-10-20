@@ -50,7 +50,7 @@ class WhammMonitor(named_modules: Array<NamedModule>) extends Monitor {
 				Null => ; // do nothing
 				AllOpcodes => {
 					for (op in Opcode) {
-						if (op != Opcode.INVALID) addOpcodePattern(op, params, func, pred);
+						if (op != Opcode.INVALID && op != Opcode.EXT) addOpcodePattern(op, params, func, pred);
 					}
 					haveProbes = true;
 				}
