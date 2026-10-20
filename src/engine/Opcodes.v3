@@ -845,6 +845,8 @@ component Opcodes {
 	def EXT_PREFIX: byte = 0xFA;
 	// Extension opcodes without a prefix, where {opcodes_no_prefix[i] == Opcode.EXT}.
 	def ext_no_prefix = Array<ExtOpcode>.new(256);
+	// Every placed extension opcode, for tiers that bind a handler to each encoding.
+	def var ext_opcodes = Array<ExtOpcode>.new(0);
 
 	new() {
 		for (op in Opcode) {
@@ -885,6 +887,7 @@ component Opcodes {
 				if (op.claim == OpcodeClaim.FLOATING) checkPlaced(op, placeFloating(op));
 			}
 		}
+		for (i < exts.length) ext_opcodes = Arrays.concat(ext_opcodes, ops[i]);
 	}
 	private def checkPlaced(op: ExtOpcode, error: string) {
 		if (error == null) return;

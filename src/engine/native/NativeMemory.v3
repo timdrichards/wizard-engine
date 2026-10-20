@@ -66,6 +66,93 @@ class NativeWasmMemory extends Memory {
 		PrivateMemoryAccess.setSize(this, new_pages, new_bytes);
 		return int.!(cur_pages);
 	}
+	// Write tracking, while a write observer is installed. Compiled code and the fast
+	// interpreter store to memory directly, so the pages are made read-only. The first
+	// store to a page faults; the signal handler ({handleWriteFault}) copies the page into
+	// {shadow} and makes it writable, and {flushWriteTracking} later reports the copy.
+	// Writes through {write_range_*} save and open their pages themselves. Pages added by
+	// {grow} while tracking are not tracked.
+	private var shadow: Array<byte>;	// pages saved by the signal handler
+	private var saved: Array<bool>;		// per OS page: in {shadow}, not yet reported
+	private var open: Array<bool>;		// per OS page: writable in this tracking period
+
+	def setWriteObserver(o: MemoryWriteObserver) {
+		if (writeObserver != null) {
+			flushWriteTracking();
+			stopTracking();
+		}
+		writeObserver = o;
+		if (o != null) startTracking();
+	}
+	def flushWriteTracking() {
+		if (saved == null) return;
+		for (i < saved.length) {
+			if (!saved[i]) continue;
+			saved[i] = false;
+			var base = i * int.!(OS_PAGE);
+			writeObserver.savedImage(this, u64.!(base), shadow[base ..+ int.!(OS_PAGE)]);
+		}
+	}
+	def restartWriteTracking() {
+		if (open == null) return;
+		flushWriteTracking();
+		for (i < open.length) open[i] = false;
+		Mmap.protect(start, u64.!(open.length) * OS_PAGE, Mmap.PROT_READ);
+	}
+	def write_range_oil_64(offset: u64, index: u64, size: u64) -> MaybeTrap<Range<byte>> {
+		var r = range_oil_64(offset, index, size);
+		if (open != null && r.ok()) openPages(offset + index, size);
+		return r;
+	}
+	def write_range_ol_64(offset: u64, size: u64) -> MaybeTrap<Range<byte>> {
+		var r = range_ol_64(offset, size);
+		if (open != null && r.ok()) openPages(offset, size);
+		return r;
+	}
+	// Called by the signal handler for a fault at {addr}. Saves and opens the page and
+	// returns true if the fault is a first write to a tracked page, so that the faulting
+	// store can simply be retried. Must not allocate.
+	def handleWriteFault(addr: Pointer) -> bool {
+		if (open == null || addr < start || addr >= limit) return false;
+		var i = int.!(u64.!(addr - start) / OS_PAGE);
+		if (i >= open.length || open[i]) return false;
+		var base = i * int.!(OS_PAGE), pos = u64.!(base);
+		var page = getReadWriteAlias64(pos, pos + OS_PAGE);
+		for (j < page.length) shadow[base + j] = page[j];
+		saved[i] = true;
+		open[i] = true;
+		Mmap.protect(start + i64.!(pos), OS_PAGE, Mmap.PROT_READ | Mmap.PROT_WRITE);
+		return true;
+	}
+	private def startTracking() {
+		if (num_bytes % OS_PAGE != 0) return; // e.g. custom page sizes: not tracked
+		var pages = int.!(num_bytes / OS_PAGE);
+		shadow = Array<byte>.new(int.!(num_bytes));
+		saved = Array<bool>.new(pages);
+		open = Array<bool>.new(pages);
+		Mmap.protect(start, num_bytes, Mmap.PROT_READ);
+		NativeMemoryTracking.add(this);
+	}
+	private def stopTracking() {
+		if (open == null) return;
+		Mmap.protect(start, u64.!(open.length) * OS_PAGE, Mmap.PROT_READ | Mmap.PROT_WRITE);
+		NativeMemoryTracking.remove(this);
+		shadow = null;
+		saved = null;
+		open = null;
+	}
+	// Report and open the pages of [pos ..+ size] that are not open yet.
+	private def openPages(pos: u64, size: u64) {
+		if (size == 0) return;
+		var first = int.!(pos / OS_PAGE), last = int.!((pos + size - 1) / OS_PAGE);
+		for (i = first; i <= last && i < open.length; i++) {
+			if (open[i]) continue;
+			var p = u64.!(i) * OS_PAGE;
+			writeObserver.savedImage(this, p, getReadWriteAlias64(p, p + OS_PAGE));
+			open[i] = true;
+			Mmap.protect(start + i64.!(p), OS_PAGE, Mmap.PROT_READ | Mmap.PROT_WRITE);
+		}
+	}
 	def getReadWriteAlias64(start: u64, end: u64) -> Range<byte> {
 		return CiRuntime.forgeRange<byte>(this.start + long.!(start), int.!(end - start));
 	}
@@ -74,3 +161,28 @@ class NativeWasmMemory extends Memory {
 	}
 }
 def GB = 1024u * 1024u * 1024u;
+def OS_PAGE: u64 = 4096; // granularity of write tracking by page protection
+
+// The native memories whose writes are being tracked, for the signal handlers.
+component NativeMemoryTracking {
+	private var tracked: List<NativeWasmMemory>;
+
+	def add(m: NativeWasmMemory) {
+		tracked = List.new(m, tracked);
+	}
+	def remove(m: NativeWasmMemory) {
+		var r: List<NativeWasmMemory>;
+		for (l = tracked; l != null; l = l.tail) {
+			if (l.head != m) r = List.new(l.head, r);
+		}
+		tracked = r;
+	}
+	// Called from a SIGSEGV handler: true if {addr} was a first write to a tracked page,
+	// which is now open, so the faulting store can be retried. Must not allocate.
+	def handleWriteFault(addr: Pointer) -> bool {
+		for (l = tracked; l != null; l = l.tail) {
+			if (l.head.handleWriteFault(addr)) return true;
+		}
+		return false;
+	}
+}
