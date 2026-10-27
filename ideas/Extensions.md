@@ -2,9 +2,16 @@
 
 A proposal for letting an instruction set extension live outside `src/engine/`: it is switched on at build time, registers its opcodes and behavior through a small set of hooks, and degrades gracefully in tiers that have no fast path for it.
 Transactions are the motivating client.
-A small proof-of-concept extension, `undo`, comes first, to show the mechanism end to end.
+Two small extensions show the mechanism end to end: `undo` (checkpoints for memory 0) and `ministe` (a subset of the Wasm Simple Transactions proposal, STE).
 
-Status: draft, for discussion. Branch `extension-registry`.
+The framework is being built twice, so the two can be compared:
+
+- **Version 1** (this document, branch `ext-v1`) uses only features Virgil has today.
+- **Version 2** (branch `ext-v2`, to come) uses open enums with per-case methods, as proposed in titzer/virgil#653. Extension instructions there are cases of `Opcode` itself.
+
+Both versions implement the same two extensions and are measured the same way. Eliot Moss's transactional Wizard (UMass) is a reference for what a real extension needs. None of its code is used.
+
+Status: draft, for discussion.
 
 ## Constraints
 
@@ -31,38 +38,38 @@ The design works within these constraints from discussion with Ben (September 20
 
 ## Design
 
-### 1. Extension instructions are descriptor objects
+### 1. Extension instructions are descriptor objects, one class each
 
 ```
 class ExtOpcode(prefix: u8, code: u16, mnemonic: string,
-                imms: Array<ImmKind>, sig: SigDecl,
-                claim: OpcodeClaim, owner: InstrExtension) { }
-
+                imms: Array<ImmKind>, sig: SigDecl, claim: OpcodeClaim) {
+    def validate(v: CodeValidator) -> bool { return true; }       // beyond the signature
+    def interpret(f: ExtFrame) -> TrapReason;                     // reference semantics
+    def accept(v: BytecodeVisitor) { v.visitExt(this); }
+    def opensBlock() -> bool { return false; }                    // block-shaped (section 9)
+    def onEnd(v: CodeValidator, pos: int) { }
+    def onBranchOut(v: CodeValidator) -> bool { return true; }
+    def endsBlock() -> bool { return false; }
+}
 enum OpcodeClaim { FIXED, FLOATING }
 ```
 
-These are the same fields as `Opcode`, plus a claim and an owner.
-The core `Opcode` enum gains exactly one case, `EXT`, meaning "look in the extension table".
-`OpcodePage` gains a parallel `Array<ExtOpcode>`.
-Extensions get their own prefix page, `0xFA`, which is unused in Wizard today.
-After the stable language revision, `ExtOpcode` and `Opcode.EXT` become extensible enum cases and the rest of this design is unchanged.
+These are the same fields as `Opcode`, plus a claim; `owner` is set when the opcode is placed.
+Each instruction is a small subclass that overrides the hooks it needs, so its encoding, validation and semantics sit together. This is the closest Virgil gets today to per-case methods: a class per instruction instead of a case per instruction.
+The core `Opcode` enum gains exactly one case, `EXT`, meaning "look in the extension table". `OpcodePage` gains a parallel `Array<ExtOpcode>`.
+A FIXED claim may make any unused byte its prefix page: `undo` uses `0xF9` and `ministe` uses `0xFA`, which is STE's prefix in its binary format. FLOATING claims take free one-byte slots.
 
-### 2. An extension is a class with hooks
+An extension shares behavior between its instructions through an ordinary base class (`UndoOp`, `TxnOp`). Virgil has no `super.method()` call, so a subclass that adds to a shared check calls a named helper (`inTransaction(v)`) rather than the overridden method.
+
+### 2. An extension is a name and a list of instructions
 
 ```
 class InstrExtension(name: string, help: string) {
-    def opcodes() -> Array<ExtOpcode>;                          // required
-    def validate(v: CodeValidator, op: ExtOpcode) -> bool;      // required
-    def interpret(op: ExtOpcode, f: ExtFrame) -> Throwable;     // required: reference semantics
-    def emitFastInt(op: ExtOpcode, masm: X86_64MacroAssembler) -> bool { return false; }
-    def emitSpc(op: ExtOpcode, spc: SinglePassCompiler) -> bool { return false; }
-    def accept(op: ExtOpcode, v: BytecodeVisitor) { v.visitExt(op); }
-    def extendTypes(...) { }                                    // placeholder: shape to be decided
-    def targets() -> Array<string>;                             // e.g. native-only extensions
+    def opcodes() -> Array<ExtOpcode>;    // called once, when opcodes are placed
 }
 ```
 
-Each hook matches over the extension's own opcodes, so no per-case methods are needed.
+Hooks that need target-specific types (`emitFastInt`, `emitSpc`) are not built: `InstrExtension` and `ExtOpcode` must compile for every target, and the v3i build does not compile `src/engine/x86-64` (open question 9).
 
 ### 3. Registration is one explicit list
 
@@ -160,22 +167,33 @@ This mirrors the existing `--object-model` choice.
 
 Not covered: pages added by `memory.grow` while tracking, memories whose size is not a multiple of 4 KiB (custom page sizes), and host functions that write guest memory without `write_range_*`.
 
+### 9. Block-shaped instructions
+
+An instruction whose `opensBlock()` is true takes a block type as its first immediate. The validator opens an ordinary block for it, closed by an ordinary `end`, and remembers the instruction in the block's control entry (`ControlEntry.ext`).
+
+- **Code at the end.** When the validator reaches that `end`, it calls `onEnd(v, pos)`. The instruction may replace the `end` byte with a one-byte extension opcode (`v.rewriteOpcode(pos, op)`). `ministe` replaces it with `tend`, a FLOATING claim that commits. Branches to the block's own label land on that byte, so they commit too.
+- **Validating twice.** Wizard validates a function more than once, so an opcode that replaced an `end` declares `endsBlock()`, and the validator treats it as `end` the next time.
+- **Leaving early.** `br`, `br_if`, `br_table` and `return` that leave such a block call `onBranchOut(v)`; `ministe` rejects them. Other ways out (`br_on_*`, `return_call*`, `throw`, `delegate`) are not checked yet.
+- **Nesting rules.** An instruction can require an enclosing block of its extension with `v.enclosingExt(owner)`.
+
+Rewriting bytecode in the validator is also how the reference implementation handles transaction ends and branches out of transactions.
+
 ## Proof of concept: `undo`
 
 Built with `--ext=undo` (`src/ext/undo/Undo.v3`, tests in `test/ext/undo/`). A volatile, in-memory miniature of a transaction:
 
 ```
-undo.begin     0xFA 0x00   [] -> []     open a checkpoint
-undo.commit    0xFA 0x01   [] -> []     keep the writes since the innermost checkpoint, close it
-undo.rollback  0xFA 0x02   [] -> []     restore every byte written since the innermost checkpoint, close it
-undo.depth     0xFA 0x03   [] -> [i32]  the number of open checkpoints
+undo.begin     0xF9 0x00   [] -> []     open a checkpoint
+undo.commit    0xF9 0x01   [] -> []     keep the writes since the innermost checkpoint, close it
+undo.rollback  0xF9 0x02   [] -> []     restore every byte written since the innermost checkpoint, close it
+undo.depth     0xF9 0x03   [] -> [i32]  the number of open checkpoints
 ```
 
 Committing a nested checkpoint folds its writes into the enclosing one. `commit` and `rollback` with no open checkpoint trap. The instructions act on memory 0, so the extension's `validate` hook rejects them in a module without a memory.
 
 | Part | In `undo` |
 |---|---|
-| Fixed claims on the extension prefix page | `0xFA 0x00..0x03` |
+| Fixed claims on its own prefix page | `0xF9 0x00..0x03` (moved from `0xFA`, which STE uses) |
 | Signature checked by the core validator | all four; `undo.depth` pushes an `i32` |
 | `validate` hook | the module must have a memory |
 | `interpret` hook with `ExtFrame` | all four |
@@ -183,11 +201,34 @@ Committing a nested checkpoint folds its writes into the enclosing one. `commit`
 | Per-instance state | `UndoLog` in the `Instance.ext_state` chain |
 | Memory write observer | `UndoObserver` records the before-image of every write, byte-exact, so mixed-width and unaligned stores and bulk operations roll back correctly |
 | Tier fallbacks | v3-int; fast-int via `runtime_EXT`; SPC bailout, so a function using `undo` stays in the interpreter while its callees are compiled |
-| Build-time opt-in | without `--ext=undo`, `0xFA 0x00` fails validation as an invalid opcode |
+| Build-time opt-in | without `--ext=undo`, `0xF9 0x00` fails validation as an invalid opcode |
 
 **Why not `undo.block ... end`.** The first version of this design used a structured `undo.block` whose matching `end` would commit. Doing that needs two things the core does not have: a way for an extension to run code at a particular `end` (the interpreter executes `end` without knowing which block it closes), and a rule for branches that leave the block without reaching its `end`. Both are real design questions for transactions, so `BLOCK_LIKE` is deferred to its own step, and `undo` uses unstructured `begin`/`commit`/`rollback`.
 
 Durable transactions later replace the in-memory undo log with a redo log on persistent storage.
+
+## Second extension: `ministe`
+
+Built with `--ext=ministe` (`src/ext/ministe/MiniSte.v3`, tests in `test/ext/ministe/`). A single-threaded subset of the Wasm Simple Transactions proposal, with STE's encodings:
+
+```
+tblock <blocktype> ... end  0xFA 0x02   run the body as a transaction; it commits at its end
+tfail                       0xFA 0x0F   [i32] -> []: roll back every open transaction, then trap
+tglobal.get <global>        0xFA 0x23   [] -> [t]
+tglobal.set <global>        0xFA 0x24   [t] -> []        undone if the transaction fails
+i32.tload <memarg>          0xFA 0x28   [i32] -> [i32]   memory 0
+i32.tstore <memarg>         0xFA 0x36   [i32 i32] -> []  memory 0
+```
+
+All but `tblock` must be inside a `tblock`. Not in the subset: `tblock`'s else clause, `ttry`, and branches or returns that leave a `tblock`, which are rejected. Without `ttry` nothing can catch a failure, so `tfail` rolls back every open transaction and traps.
+
+It needs what `undo` does not: immediates (block type, memory argument, global index), a block-shaped instruction, code at the block's end, a one-byte FLOATING opcode, nesting rules, and a signature that depends on an immediate (`tglobal.*` have a null `sig` and push and pop in `validate`).
+
+**Tests.**
+- 8 execution tests on every tier: commit at the end; `br` to the block's own end; `tload`; `tfail` rolling back memory, nested transactions, a compiled callee's store, and a global; `tglobal` commit.
+- 5 validation tests: `tstore` and `tfail` outside a `tblock`, `br` and `return` out of one, and valid nesting.
+- With `undo` and the registry tests, all 108 pass on the four x86-64-linux tiers, and 36 on v3i.
+- With rollback disabled, exactly the 4 rollback tests fail.
 
 ## Steps
 
@@ -227,7 +268,7 @@ Each step is a small PR with a check that shows it is done.
 
 ## Open questions
 
-1. Is a separate prefix page (`0xFA`) for extensions the right interim, or should extension opcodes share existing pages?
+1. Each fixed-encoding extension claims its own prefix byte (`undo` `0xF9`, `ministe` `0xFA`), created only when the extension is built in. Is claiming new prefix bytes the right interim, or should extension opcodes share existing pages?
 2. Is `canon_id` stable and global enough to name a type in an off-heap object?
 3. Is generating the registration list from `--ext` and each extension's `extension.txt` acceptable, or would a separate main file per configuration be better?
 4. Step 3 chose write-protect tracking for fast-tier stores (no codegen change, no cost when unused), with a hook in both signal handlers ahead of the out-of-bounds trap. Is that acceptable, or would a per-memory slow-path flag at the bounds check fit Wizard better?

@@ -1,0 +1,125 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// Tests for the mini-STE extension (src/ext/ministe). Built only with build.sh --ext=ministe.
+def X_ = TestTiers.addTests([
+	("ministe_commit_at_end", test_commit_at_end),
+	("ministe_br_to_own_end_commits", test_br_to_own_end_commits),
+	("ministe_tload", test_tload),
+	("ministe_tfail_rolls_back_memory", test_tfail_rolls_back_memory),
+	("ministe_tfail_rolls_back_nested", test_tfail_rolls_back_nested),
+	("ministe_tfail_rolls_back_callee", test_tfail_rolls_back_callee),
+	("ministe_tglobal_commit", test_tglobal_commit),
+	("ministe_tglobal_rollback", test_tglobal_rollback)
+]);
+def Y_ = void(
+	UnitTests.registerT("ministe:", "tstore_outside", CodeValidatorTester.new, test_tstore_outside),
+	UnitTests.registerT("ministe:", "tfail_outside", CodeValidatorTester.new, test_tfail_outside),
+	UnitTests.registerT("ministe:", "br_out", CodeValidatorTester.new, test_br_out),
+	UnitTests.registerT("ministe:", "return_out", CodeValidatorTester.new, test_return_out),
+	UnitTests.registerT("ministe:", "valid_nested", CodeValidatorTester.new, test_valid_nested),
+	()
+);
+
+def TBLOCK: Array<byte> = [0xFA, 0x02, 0x40];		// tblock with an empty block type
+def TBLOCK_I32: Array<byte> = [0xFA, 0x02, 0x7F];	// tblock (result i32)
+def END: Array<byte> = [0x0B];
+def TFAIL: Array<byte> = [0xFA, 0x0F];
+def TSTORE: Array<byte> = [0xFA, 0x36, 2, 0];
+def TLOAD: Array<byte> = [0xFA, 0x28, 2, 0];
+def ORIG: Array<byte> = [1, 2, 3, 4, 5, 6, 7, 8];
+
+def op(o: Opcode) -> byte { return u8.!(o.code); }
+def i32const(v: byte) -> Array<byte> { return [op(Opcode.I32_CONST), v]; } // v < 64
+def tstore(addr: byte, v: byte) -> Array<byte> { return seq([i32const(addr), i32const(v), TSTORE]); }
+def tglobal_set(g: byte, v: byte) -> Array<byte> { return seq([i32const(v), [0xFA, 0x24, g]]); }
+def seq(parts: Array<Array<byte>>) -> Array<byte> {
+	var r = Array<byte>.new(0);
+	for (p in parts) r = Arrays.concat(r, p);
+	return r;
+}
+// A module with one page of memory holding ORIG at offset 16.
+def setup(i: ExeTester, sig: SigDecl) -> ExeTester {
+	i.addMemory(1, Max.Set(1));
+	i.addData(16, ORIG);
+	i.sig(sig);
+	return i;
+}
+// Runs, expects a trap with {reason}, and returns the instance to inspect.
+def runTrap(i: ExeTester, reason: TrapReason) -> Instance {
+	var r = i.run(Values.NONE);
+	if (!Traps.result(reason).equals(r.1)) i.t.fail1("expected a trap, got %q", r.1.render);
+	return r.0;
+}
+def checkMem(i: ExeTester, inst: Instance, offset: u32, expected: Array<byte>) {
+	var r = inst.memories[0].range_ol_64(offset, u64.!(expected.length));
+	for (j < expected.length) {
+		if (r.result[j] != expected[j]) return i.t.fail2("memory @%d: expected %d", offset + u32.!(j), expected[j]);
+	}
+}
+
+def test_commit_at_end(i: ExeTester) {
+	setup(i, SigCache.v_v).codev(seq([TBLOCK, tstore(16, 42), END]));
+	i.noargs().assert2_mem(16, [42, 0, 0, 0, 5, 6, 7, 8]);
+}
+def test_br_to_own_end_commits(i: ExeTester) {
+	setup(i, SigCache.v_v).codev(seq([TBLOCK, tstore(16, 42), [op(Opcode.BR), 0], END]));
+	i.noargs().assert2_mem(16, [42, 0, 0, 0, 5, 6, 7, 8]);
+}
+def test_tload(i: ExeTester) {
+	setup(i, SigCache.v_i).codev(seq([TBLOCK_I32, i32const(16), TLOAD, END]));
+	i.noargs().assert2_i(0x04030201);
+}
+def test_tfail_rolls_back_memory(i: ExeTester) {
+	setup(i, SigCache.v_v).codev(seq([TBLOCK, tstore(16, 42), i32const(1), TFAIL, END]));
+	checkMem(i, runTrap(i, TrapReason.ERROR), 16, ORIG);
+}
+def test_tfail_rolls_back_nested(i: ExeTester) {
+	// The inner transaction commits into the outer one; the outer one then fails.
+	setup(i, SigCache.v_v).codev(seq([TBLOCK, tstore(16, 42), TBLOCK, tstore(20, 43), END, i32const(1), TFAIL, END]));
+	checkMem(i, runTrap(i, TrapReason.ERROR), 16, ORIG);
+}
+def test_tfail_rolls_back_callee(i: ExeTester) {
+	// A plain store in a called function, which the jit strategies compile, is undone too.
+	setup(i, SigCache.v_v);
+	var store: Array<byte> = [op(Opcode.I32_CONST), 16, op(Opcode.I32_CONST), 42, op(Opcode.I32_STORE), 2, 0];
+	var f = i.newFunction(SigCache.v_v, store);
+	i.codev(seq([TBLOCK, [op(Opcode.CALL), byte.!(f.func_index)], i32const(1), TFAIL, END]));
+	checkMem(i, runTrap(i, TrapReason.ERROR), 16, ORIG);
+}
+def test_tglobal_commit(i: ExeTester) {
+	setup(i, SigCache.v_i);
+	i.newGlobal(ValueType.I32, InitExpr.I32(5));
+	i.codev(seq([TBLOCK, tglobal_set(0, 7), END, [op(Opcode.GLOBAL_GET), 0]]));
+	i.noargs().assert2_i(7);
+}
+def test_tglobal_rollback(i: ExeTester) {
+	setup(i, SigCache.v_v);
+	i.newGlobal(ValueType.I32, InitExpr.I32(5));
+	i.codev(seq([TBLOCK, tglobal_set(0, 7), i32const(1), TFAIL, END]));
+	var inst = runTrap(i, TrapReason.ERROR);
+	var got = Values.unbox_i(inst.globals[0].get());
+	if (got != 5) i.t.fail1("expected the global restored to 5, got %d", got);
+}
+
+// Validation rules.
+def vsetup(t: CodeValidatorTester) -> CodeValidatorTester {
+	t.addMemory(1, Max.Set(1));
+	t.sig(SigCache.v_v);
+	return t;
+}
+def test_tstore_outside(t: CodeValidatorTester) {
+	vsetup(t).invalid(WasmError.INVALID_OPCODE, tstore(16, 42), 5);
+}
+def test_tfail_outside(t: CodeValidatorTester) {
+	vsetup(t).invalid(WasmError.INVALID_OPCODE, seq([i32const(1), TFAIL]), 3);
+}
+def test_br_out(t: CodeValidatorTester) {
+	vsetup(t).invalid(WasmError.INVALID_OPCODE, seq([[op(Opcode.BLOCK), 0x40], TBLOCK, [op(Opcode.BR), 1], END, END]), 6);
+}
+def test_return_out(t: CodeValidatorTester) {
+	vsetup(t).invalid(WasmError.INVALID_OPCODE, seq([TBLOCK, [op(Opcode.RETURN)], END]), 4);
+}
+def test_valid_nested(t: CodeValidatorTester) {
+	vsetup(t).valid(seq([TBLOCK, tstore(16, 42), TBLOCK, i32const(16), TLOAD, [op(Opcode.DROP)], END, END]));
+}

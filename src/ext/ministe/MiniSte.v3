@@ -1,0 +1,225 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// A small subset of the Wasm Simple Transactions proposal (STE), written to exercise the
+// extension framework: immediates, a block-shaped instruction, code at the block's end,
+// and rules about where instructions may appear. Single-threaded, so there is no
+// concurrency control: a transaction's writes to memory 0 and to globals are undone if
+// it fails. Encodings follow STE's 0xFA prefix.
+//
+//   tblock <blocktype> ... end  0xFA 0x02   run the body as a transaction; it commits at its end
+//   tfail                       0xFA 0x0F   [i32] -> []: roll back every open transaction and
+//                                            trap (a failure no handler catches)
+//   tglobal.get <global>        0xFA 0x23   [] -> [t]
+//   tglobal.set <global>        0xFA 0x24   [t] -> []        undone if the transaction fails
+//   i32.tload <memarg>          0xFA 0x28   [i32] -> [i32]   memory 0
+//   i32.tstore <memarg>         0xFA 0x36   [i32 i32] -> []  memory 0
+//
+// All but tblock must appear inside a tblock. Not in this subset: tblock's else clause,
+// ttry, and branches or returns that leave a tblock, which the validator rejects.
+class MiniSteExtension extends InstrExtension {
+	new() super("ministe", "a subset of Wasm simple transactions (proof of concept)") { }
+	def opcodes() -> Array<ExtOpcode> {
+		var tend = TEnd.new();
+		return [TBlock.new(tend), tend, TFail.new(), TGlobalGet.new(), TGlobalSet.new(), I32TLoad.new(), I32TStore.new()];
+	}
+}
+
+// The transaction instructions share the 0xFA prefix and the rule that they appear
+// inside a tblock.
+class TxnOp extends ExtOpcode {
+	new(code: u16, mnemonic: string, imms: Array<ImmKind>, sig: SigDecl)
+		super(0xFA, code, mnemonic, imms, sig, OpcodeClaim.FIXED) { }
+	def validate(v: CodeValidator) -> bool {
+		return inTransaction(v);
+	}
+	// Report an error unless this instruction is inside a tblock. Virgil has no
+	// {super.validate()} call, so subclasses that extend validation call this first.
+	def inTransaction(v: CodeValidator) -> bool {
+		if (TBlock.?(v.enclosingExt(owner))) return true;
+		v.err_atpc().setc(WasmError.INVALID_OPCODE, Strings.format1("%s outside a tblock", mnemonic));
+		return false;
+	}
+}
+class TBlock extends TxnOp {
+	def tend: TEnd;
+	new(tend) super(0x02, "tblock", ImmSigs.BLOCKT, null) { }
+	def opensBlock() -> bool { return true; }
+	def validate(v: CodeValidator) -> bool { return true; } // may appear anywhere
+	// The block's end commits: replace it with tend.
+	def onEnd(v: CodeValidator, pos: int) {
+		v.rewriteOpcode(pos, tend);
+	}
+	def onBranchOut(v: CodeValidator) -> bool {
+		v.err_atpc().setc(WasmError.INVALID_OPCODE, "branch or return out of a tblock (not supported)");
+		return false;
+	}
+	def interpret(f: ExtFrame) -> TrapReason {
+		TxnLogs.of(f.instance()).begin();
+		return TrapReason.NONE;
+	}
+}
+// Internal: replaces the end of each tblock. One byte, at any free slot.
+class TEnd extends ExtOpcode {
+	new() super(0, 0, "tend", ImmSigs.NONE, SigCache.v_v, OpcodeClaim.FLOATING) { }
+	def endsBlock() -> bool { return true; }
+	def interpret(f: ExtFrame) -> TrapReason {
+		TxnLogs.of(f.instance()).commit();
+		return TrapReason.NONE;
+	}
+}
+class TFail extends TxnOp {
+	new() super(0x0F, "tfail", ImmSigs.NONE, SigCache.i_v) { }
+	def validate(v: CodeValidator) -> bool {
+		if (!inTransaction(v)) return false;
+		v.setUnreachable();
+		return true;
+	}
+	def interpret(f: ExtFrame) -> TrapReason {
+		f.popi(); // the failure value; with no handler in this subset, it is dropped
+		TxnLogs.of(f.instance()).abortAll();
+		return TrapReason.ERROR;
+	}
+}
+class TGlobalGet extends TxnOp {
+	new() super(0x23, "tglobal.get", ImmSigs.GLOBAL, null) { }
+	def validate(v: CodeValidator) -> bool {
+		if (!inTransaction(v)) return false;
+		var g = v.parser.readGlobalRef();
+		if (g == null) return false;
+		v.push(g.valtype);
+		return true;
+	}
+	def interpret(f: ExtFrame) -> TrapReason {
+		f.push(f.instance().globals[f.imm.read_uleb32()].get());
+		return TrapReason.NONE;
+	}
+}
+class TGlobalSet extends TxnOp {
+	new() super(0x24, "tglobal.set", ImmSigs.GLOBAL, null) { }
+	def validate(v: CodeValidator) -> bool {
+		if (!inTransaction(v)) return false;
+		var g = v.parser.readGlobalRef();
+		if (g == null) return false;
+		if (!g.mutable) {
+			v.err_atpc().setc(WasmError.ILLEGAL_ASSIGNMENT, "tglobal.set of an immutable global");
+			return false;
+		}
+		v.popE(g.valtype);
+		return true;
+	}
+	def interpret(f: ExtFrame) -> TrapReason {
+		var g = f.instance().globals[f.imm.read_uleb32()];
+		var v = f.pop(g.valtype);
+		TxnLogs.of(f.instance()).saveGlobal(g);
+		g.set(v);
+		return TrapReason.NONE;
+	}
+}
+// Loads and stores on memory 0. Stores are undone through the memory's write observer.
+class TxnMemOp extends TxnOp {
+	new(code: u16, mnemonic: string, sig: SigDecl) super(code, mnemonic, ImmSigs.MEMARG, sig) { }
+	def validate(v: CodeValidator) -> bool {
+		if (!inTransaction(v)) return false;
+		var memarg = v.parser.readMemoryArg();
+		if (memarg.memory_index == 0) return true;
+		v.err_atpc().setc(WasmError.INVALID_OPCODE, Strings.format1("%s uses only memory 0", mnemonic));
+		return false;
+	}
+}
+class I32TLoad extends TxnMemOp {
+	new() super(0x28, "i32.tload", SigCache.i_i) { }
+	def interpret(f: ExtFrame) -> TrapReason {
+		var memarg = f.imm.read_MemArg();
+		var r = f.instance().memories[0].range_oil_64(memarg.offset, u32.view(f.popi()), 4);
+		if (!r.ok()) return r.reason;
+		var b = r.result;
+		f.pushi(b[0] | (int.!(b[1]) << 8) | (int.!(b[2]) << 16) | (int.!(b[3]) << 24));
+		return TrapReason.NONE;
+	}
+}
+class I32TStore extends TxnMemOp {
+	new() super(0x36, "i32.tstore", SigCache.ii_v) { }
+	def interpret(f: ExtFrame) -> TrapReason {
+		var memarg = f.imm.read_MemArg();
+		var val = f.popi();
+		var r = f.instance().memories[0].write_range_oil_64(memarg.offset, u32.view(f.popi()), 4);
+		if (!r.ok()) return r.reason;
+		var b = r.result;
+		b[0] = byte.view(val); b[1] = byte.view(val >> 8); b[2] = byte.view(val >> 16); b[3] = byte.view(val >> 24);
+		return TrapReason.NONE;
+	}
+}
+
+// The transaction log of one instance: before-images of memory 0 and old values of
+// globals since the outermost open transaction, and where each open transaction starts.
+class TxnLog(memory: Memory) extends InstanceExtState {
+	def marks = Vector<(int, int)>.new();		// (memory log, global log) position of each open transaction
+	def positions = Vector<u64>.new();		// memory offset of each before-image
+	def images = Vector<Array<byte>>.new();		// the bytes before the write
+	def globals = Vector<(Global, Value)>.new();	// each global and its value before the write
+	var observer: TxnObserver;
+
+	def begin() {
+		if (memory != null) {
+			if (observer == null) observer = TxnObserver.new(this);
+			if (marks.length == 0) memory.setWriteObserver(observer);
+			else memory.restartWriteTracking(); // the next write to any page belongs to this transaction
+		}
+		marks.put((positions.length, globals.length));
+	}
+	// Commit the innermost transaction; its undo information folds into the enclosing one.
+	def commit() {
+		if (marks.length == 0) return;
+		if (memory != null) memory.flushWriteTracking();
+		marks.resize(marks.length - 1);
+		if (marks.length == 0) clear();
+	}
+	// Roll back every open transaction.
+	def abortAll() {
+		if (marks.length == 0) return;
+		if (memory != null) memory.setWriteObserver(null);
+		for (i = positions.length - 1; i >= 0; i--) {
+			var image = images[i];
+			var r = memory.range_ol_64(positions[i], u64.!(image.length));
+			if (r.ok()) for (j < image.length) r.result[j] = image[j];
+		}
+		for (i = globals.length - 1; i >= 0; i--) globals[i].0.set(globals[i].1);
+		marks.resize(0);
+		clear();
+	}
+	def saveGlobal(g: Global) {
+		globals.put((g, g.get()));
+	}
+	def save(pos: u64, image: Range<byte>) {
+		positions.put(pos);
+		images.put(Ranges.dup(image));
+	}
+	private def clear() {
+		positions.resize(0);
+		images.resize(0);
+		globals.resize(0);
+		if (memory != null) memory.setWriteObserver(null);
+	}
+}
+class TxnObserver(log: TxnLog) extends MemoryWriteObserver {
+	def beforeWrite(memory: Memory, pos: u64, size: u64) {
+		var r = memory.range_ol_64(pos, size);
+		if (r.ok()) log.save(pos, r.result);
+	}
+	def savedImage(memory: Memory, pos: u64, image: Range<byte>) {
+		log.save(pos, image);
+	}
+}
+component TxnLogs {
+	// Find the transaction log of {instance}, creating it on first use.
+	def of(instance: Instance) -> TxnLog {
+		for (s = instance.ext_state; s != null; s = s.next) {
+			if (TxnLog.?(s)) return TxnLog.!(s);
+		}
+		var log = TxnLog.new(if(instance.memories.length > 0, instance.memories[0]));
+		log.next = instance.ext_state;
+		instance.ext_state = log;
+		return log;
+	}
+}
