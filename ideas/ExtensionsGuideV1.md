@@ -53,6 +53,7 @@ There are more than 256 Wasm instructions, so one byte is not enough. Wasm uses 
 Before we add anything, here is the road every instruction travels.
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart LR
     B["Module bytes<br/>…0x41 0x10 0x36…"] --> D["Decode<br/>opcode tables<br/>(OpcodePage)"]
     D --> V["Validate<br/>CodeValidator<br/>(type-check every function)"]
@@ -103,6 +104,7 @@ Version 1 follows every one of these rules.
 Here it is in one picture:
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     subgraph EXT["src/ext/undo/  (only compiled with --ext=undo)"]
         UE["class UndoExtension<br/>extends InstrExtension"]
@@ -215,6 +217,7 @@ You build with the new flag ([`build.sh` line 119](https://github.com/timdrichar
 and `build.sh` does three things ([lines 151 to 166](https://github.com/timdrichards/wizard-engine/blob/11e9758fd7cb63d6e1267fdee03d00f69e036a48/build.sh#L151-L166) and [228 to 244](https://github.com/timdrichards/wizard-engine/blob/11e9758fd7cb63d6e1267fdee03d00f69e036a48/build.sh#L228-L244)):
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart LR
     F["--ext=undo,ministe"] --> A["Add src/ext/undo/*.v3<br/>and src/ext/ministe/*.v3<br/>to the engine sources"]
     F --> B["Add test/ext/undo/*.v3 and<br/>test/ext/ministe/*.v3<br/>to the unit tests"]
@@ -244,6 +247,7 @@ If two claims want the same seat, **the build stops** with an error naming both.
 What actually goes in the table? A slot can only hold an `Opcode`, and we can't add cases to the enum. So the slot holds the single placeholder [`Opcode.EXT`](https://github.com/timdrichards/wizard-engine/blob/11e9758fd7cb63d6e1267fdee03d00f69e036a48/src/engine/Opcodes.v3#L622), and a **parallel array** right next to it holds the real `ExtOpcode`: [`OpcodePage.ext`](https://github.com/timdrichards/wizard-engine/blob/11e9758fd7cb63d6e1267fdee03d00f69e036a48/src/engine/Opcodes.v3#L740) for prefixed pages and [`Opcodes.ext_no_prefix`](https://github.com/timdrichards/wizard-engine/blob/11e9758fd7cb63d6e1267fdee03d00f69e036a48/src/engine/Opcodes.v3#L846) for single bytes.
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart LR
     subgraph P["page for prefix 0xF9 (created for undo)"]
         direction TB
@@ -403,6 +407,7 @@ This is harder than it looks, for two reasons. First, the interpreter runs `end`
 Our answer has four parts, all in the validator:
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     A["Validator meets tblock"] -->|"opensBlock() is true"| B["Open an ordinary block,<br/>remember tblock in ControlEntry.ext"]
     B --> C["...validate the body..."]
@@ -531,6 +536,7 @@ Ministe exists to push on the framework where undo doesn't:
 Here is the life of a transaction:
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     subgraph BEFORE["The bytes in the module"]
         direction LR
@@ -568,6 +574,7 @@ With undo and the framework's own tests, that's **108 passing tests on the four 
 Measured against master [`5d5f84a2`](https://github.com/timdrichards/wizard-engine/commit/5d5f84a2aa9c9bc07428f126d9bfd533fbe36078): **558 lines added and 29 removed in 16 core files** (everything in `src/` outside `src/ext/`), plus the extensions and tests. You can see the full diff on GitHub: [master...ext-v1](https://github.com/timdrichards/wizard-engine/compare/5d5f84a2aa9c9bc07428f126d9bfd533fbe36078...11e9758fd7cb63d6e1267fdee03d00f69e036a48).
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     subgraph NEW["New files"]
         n1["ExtOpcode.v3<br/>the descriptor + hooks"]
