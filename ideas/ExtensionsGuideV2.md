@@ -57,6 +57,7 @@ There are more than 256 Wasm instructions, so one byte is not enough. Wasm uses 
 Before we add anything, here is the road every instruction travels.
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart LR
     B["Module bytes<br/>…0x41 0x10 0x36…"] --> D["Decode<br/>opcode tables<br/>(OpcodePage)"]
     D --> V["Validate<br/>CodeValidator<br/>(type-check every function)"]
@@ -140,6 +141,7 @@ enum Animal.Farm {
 `Animal.Farm.COW` *is* an `Animal`. It has a tag (its number) after all of `Animal`'s own cases. `for (a in Animal)` visits it. `Animal.count` counts it. Overrides stack up the way you'd hope: **a case's own method beats its subtype enum's, which beats the root's.**
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     R["enum Animal (root, open)<br/>speak() = '...'"]
     R --> C["CAT tag 0"]
@@ -164,6 +166,7 @@ That second point is the whole trick of Version 2.
 ## 5. The big idea of Version 2
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     subgraph EXT["src/ext/undo/Undo.v3  (only compiled with --ext=undo)"]
         UE["enum Opcode.Undo {<br/>  BEGIN(0xF9, 0x00, ...) { def interpret ... },<br/>  COMMIT(...) { ... }, ...<br/>  def validate ...  // shared<br/>}"]
@@ -268,6 +271,7 @@ An extension lives in `src/ext/<name>/*.v3`, its tests in `test/ext/<name>/`. Bu
 The whole of the build change is a loop ([`build.sh` lines 147 to 162](https://github.com/timdrichards/wizard-engine/blob/2c8f1798cc02b8e8cab5eb2a5156227173026f5d/build.sh#L147-L162)):
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart LR
     F["--ext=undo,ministe"] --> A["Add src/ext/undo/*.v3<br/>and src/ext/ministe/*.v3<br/>to the engine sources"]
     F --> B["Add test/ext/undo/*.v3 and<br/>test/ext/ministe/*.v3<br/>to the unit tests"]
@@ -289,6 +293,7 @@ Every extension case needs an encoding. This happens in the [`Opcodes`](https://
 **Telling core from extension.** Core cases come first in tag order, ending with `SWITCH`. So [`LAST_CORE_TAG`](https://github.com/timdrichards/wizard-engine/blob/2c8f1798cc02b8e8cab5eb2a5156227173026f5d/src/engine/Opcodes.v3#L853) is `Opcode.SWITCH.tag`, and [`isExt(op)`](https://github.com/timdrichards/wizard-engine/blob/2c8f1798cc02b8e8cab5eb2a5156227173026f5d/src/engine/Opcodes.v3#L882) is just `op.tag > LAST_CORE_TAG`. One comparison, no lookups.
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart LR
     subgraph TAGS["Opcode tags, in order"]
         direction LR
@@ -309,6 +314,7 @@ A collision stops the build with an error naming both opcodes. (Before this work
 What goes in the table is **the case itself**, put there by [`OpcodePage.placeAt`](https://github.com/timdrichards/wizard-engine/blob/2c8f1798cc02b8e8cab5eb2a5156227173026f5d/src/engine/Opcodes.v3#L801):
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart LR
     subgraph P["page for prefix 0xF9 (created for undo)"]
         direction TB
@@ -433,6 +439,7 @@ end          ;; commits here
 Two hard parts: the interpreter runs `end` without knowing which block it closes, and a branch can leave a block without reaching its `end`. The answer is the same as Version 1, all in the validator:
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     A["Validator meets Opcode.Txn.TBLOCK"] -->|"opensBlock() is true"| B["Open an ordinary block,<br/>remember the case in ControlEntry.ext"]
     B --> C["...validate the body..."]
@@ -598,6 +605,7 @@ Notice `TBLOCK` and `TEND` override `validate` to `return true`, opting out of t
 The life of a transaction:
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     subgraph BEFORE["The bytes in the module"]
         direction LR
@@ -630,6 +638,7 @@ With undo and the framework's own tests: **108 passing on the four x86-64 tiers 
 Against master [`5d5f84a2`](https://github.com/timdrichards/wizard-engine/commit/5d5f84a2aa9c9bc07428f126d9bfd533fbe36078): **450 lines added and 29 removed in 14 core files**, versus Version 1's 558 and 29 in 16. Full diff: [master...ext-v2](https://github.com/timdrichards/wizard-engine/compare/5d5f84a2aa9c9bc07428f126d9bfd533fbe36078...2c8f1798cc02b8e8cab5eb2a5156227173026f5d).
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TB
     subgraph NEW["New file"]
         n1["ExtFrame.v3"]
@@ -685,6 +694,7 @@ Here's the other half of the story. Version 2 needs a Virgil compiler with open 
 ### Where it came from
 
 ```mermaid
+%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false, "padding": 20, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart LR
     U["titzer/virgil master<br/>908c7e2"] --> R["timdrichards/virgil<br/>open-enums-rebased"]
     E["Eliot's PR #653<br/>(on an older Virgil)"] -- "rebased: 63+ conflict hunks" --> R
