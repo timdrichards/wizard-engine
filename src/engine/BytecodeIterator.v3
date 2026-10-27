@@ -76,7 +76,7 @@ class BytecodeIterator {
 		imm_pos = codeptr.pos;
 
 		// Skip immediates.
-		codeptr.skip_immediates(opcode.imms);
+		codeptr.skip_immediates_of(opcode, pc);
 		return opcode;
 	}
 	// Dispatches on the local declarations, if at the start of the function.
@@ -203,7 +203,7 @@ class BytecodeIterator {
 			INVALID =>			v.visit_INVALID(0, 0); // TODO: pass correct prefix and opcode
 			EXT => {
 				var ext = codeptr.ext_opcode_at(pc);
-				if (ext != null) ext.owner.accept(ext, v);
+				if (ext != null) ext.accept(v);
 				else v.visit_INVALID(0, 0);
 			}
 			UNREACHABLE =>			v.visit_UNREACHABLE();

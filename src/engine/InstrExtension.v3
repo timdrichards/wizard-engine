@@ -1,33 +1,20 @@
 // Copyright 2026 Wizard authors. All rights reserved.
 // See LICENSE for details of Apache 2.0 license.
 
-// Base class for an instruction set extension. An extension lives in src/ext/<name>/
-// and is compiled with {build.sh --ext=<name>}. See ideas/Extensions.md.
-// Each hook receives one of this extension's own opcodes and matches over them.
+// An instruction set extension: a name, and the instructions it contributes. It lives in
+// src/ext/<name>/ and is compiled with {build.sh --ext=<name>}. Each instruction is an
+// {ExtOpcode} subclass carrying its own hooks. See ideas/Extensions.md.
 class InstrExtension(name: string, help: string) {
 	// The instructions this extension contributes. Called once, when opcodes are placed.
 	def opcodes() -> Array<ExtOpcode> {
 		return Array<ExtOpcode>.new(0);
 	}
-	// Extra validation for {op}, after the validator has checked its signature.
-	// Report an error through {v.err_atpc()} and return false to reject the code.
-	def validate(v: CodeValidator, op: ExtOpcode) -> bool {
-		return true;
-	}
-	// The reference semantics of {op}: pop its arguments from {f}, push its results,
-	// and return {TrapReason.NONE}, or return the reason to trap.
-	def interpret(op: ExtOpcode, f: ExtFrame) -> TrapReason {
-		return TrapReason.UNIMPLEMENTED;
-	}
-	// Present {op} to a bytecode visitor. Override to give particular visitors more.
-	def accept(op: ExtOpcode, v: BytecodeVisitor) {
-		v.visitExt(op);
-	}
 }
 
-// The running frame, as an extension's {interpret} hook sees it. Each execution tier
+// The running frame, as an instruction's {interpret} hook sees it. Each execution tier
 // provides one.
 class ExtFrame {
+	def imm = CodePtr.new(null);	// the instruction's immediates, positioned at the first
 	def instance() -> Instance;
 	def pop(t: ValueType) -> Value;
 	def push(v: Value);

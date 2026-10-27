@@ -28,10 +28,10 @@ def registerTests() {
 }
 def Y_ = UnitTests.registerT("undo:", "needs_memory", CodeValidatorTester.new, test_needs_memory);
 
-def BEGIN: Array<byte> = [0xFA, 0x00];
-def COMMIT: Array<byte> = [0xFA, 0x01];
-def ROLLBACK: Array<byte> = [0xFA, 0x02];
-def DEPTH: Array<byte> = [0xFA, 0x03];
+def BEGIN: Array<byte> = [0xF9, 0x00];
+def COMMIT: Array<byte> = [0xF9, 0x01];
+def ROLLBACK: Array<byte> = [0xF9, 0x02];
+def DEPTH: Array<byte> = [0xF9, 0x03];
 def ORIG: Array<byte> = [1, 2, 3, 4, 5, 6, 7, 8];
 
 def op(o: Opcode) -> byte { return u8.!(o.code); }

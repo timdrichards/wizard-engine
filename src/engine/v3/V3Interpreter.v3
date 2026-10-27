@@ -1405,7 +1405,11 @@ class V3Interpreter extends WasmStack {
 					trap(TrapReason.INVALID_OPCODE);
 				} else {
 					if (extFrame == null) extFrame = V3ExtFrame.new(this);
-					var reason = ext.owner.interpret(ext, extFrame);
+					var start = codeptr.pos;
+					extFrame.imm.reset(codeptr.data, start, codeptr.limit);
+					var reason = ext.interpret(extFrame);
+					codeptr.at(start);
+					codeptr.skip_immediates(ext.imms);
 					if (reason != TrapReason.NONE) trap(reason);
 				}
 			}

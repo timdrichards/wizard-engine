@@ -70,10 +70,24 @@ component X86_64Runtime {
 	}
 	// Runs the extension opcode at {pc} in {func} through its extension's interpret hook.
 	def runtime_EXT(stack: NativeStack, func: WasmFunction, pc: int) -> Throwable {
-		var ext = CodePtr.new(func.decl.cur_bytecode).ext_opcode_at(pc);
+		var cp = CodePtr.new(func.decl.cur_bytecode);
+		var ext = cp.ext_opcode_at(pc);
 		if (ext == null) return stack.trap(TrapReason.INVALID_OPCODE);
-		var reason = ext.owner.interpret(ext, NativeExtFrame.new(stack, func.instance));
+		cp.at(pc);
+		cp.read_opcode();
+		var start = cp.pos;
+		var f = NativeExtFrame.new(stack, func.instance);
+		f.imm.reset(cp.data, start, cp.limit);
+		var reason = ext.interpret(f);
 		if (reason != TrapReason.NONE) return stack.trap(reason);
+		// The handler resumes at the saved ip, just after the opcode: move it past the immediates.
+		cp.at(start);
+		cp.skip_immediates(ext.imms);
+		var delta = cp.pos - start;
+		if (delta > 0) {
+			var ip_slot = stack.rsp + Pointer.SIZE + NativeInterpreterFrame.ip.offset;
+			ip_slot.store<Pointer>(ip_slot.load<Pointer>() + delta);
+		}
 		return null;
 	}
 	def runtime_GET_LOCAL_PROBE(func: WasmFunction, pc: int) -> Probe {

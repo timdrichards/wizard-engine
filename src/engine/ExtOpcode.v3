@@ -7,10 +7,30 @@ enum OpcodeClaim {
 	FLOATING	// any free one-byte slot; internal to the engine, never in input modules
 }
 
-// Describes one instruction contributed by an {InstrExtension}. In the opcode tables
-// it appears as {Opcode.EXT}, and {Opcodes.findExt} returns this descriptor.
+// One instruction contributed by an {InstrExtension}. In the opcode tables it appears
+// as {Opcode.EXT}, and {Opcodes.findExt} returns this descriptor. An extension defines
+// each instruction as a subclass that overrides the hooks it needs, so an instruction's
+// encoding, validation and semantics sit together. See ideas/Extensions.md.
 class ExtOpcode(prefix: u8, code: u16, mnemonic: string, imms: Array<ImmKind>, sig: SigDecl, claim: OpcodeClaim) {
 	var owner: InstrExtension;	// set when the opcode is placed
 	var placed_prefix: u8;		// the final encoding; for FLOATING it differs from {prefix, code}
 	var placed_code: u16;
+
+	// Validation beyond the signature, which the validator checks first unless {sig} is
+	// null (then this hook pops and pushes with {v.popE} and {v.push}). Immediates are read
+	// with {v.parser}, which is positioned just after the opcode; errors are reported with
+	// {v.err_atpc()}. Return false to reject the code.
+	def validate(v: CodeValidator) -> bool {
+		return true;
+	}
+	// The reference semantics: read immediates from {f.imm}, pop arguments from {f}, push
+	// results, and return {TrapReason.NONE}, or the reason to trap.
+	def interpret(f: ExtFrame) -> TrapReason {
+		return TrapReason.UNIMPLEMENTED;
+	}
+	// Present this instruction to a bytecode visitor. Override to give particular
+	// visitors more than {visitExt}.
+	def accept(v: BytecodeVisitor) {
+		v.visitExt(this);
+	}
 }

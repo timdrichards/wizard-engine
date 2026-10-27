@@ -1378,13 +1378,16 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 				}
 				EXT => {
 					var ext = codeptr.ext_opcode_at(opcode_pos);
-					// Extension opcodes with immediates are not supported yet.
-					if (ext == null || ext.imms.length != 0) {
+					if (ext == null) {
 						codeptr.at(opcode_pos);
 						return err_atpc().InvalidOpcode(codeptr.read1(), codeptr.read_uleb32());
 					}
-					checkSignature(ext.sig);
-					if (!ext.owner.validate(this, ext)) return;
+					if (ext.sig != null) checkSignature(ext.sig);
+					var start = codeptr.pos;
+					if (!ext.validate(this)) return;
+					// Continue after the immediates, whatever the hook read.
+					codeptr.at(start);
+					codeptr.skip_immediates(ext.imms);
 				}
 				_ => {
 					if (opcode.sig != null) {
