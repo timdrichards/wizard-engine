@@ -1,0 +1,13 @@
+// Copyright 2026 Wizard authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
+
+// The running frame, as an extension opcode's {interpret} hook sees it. Each execution
+// tier provides one.
+class ExtFrame {
+	def imm = CodePtr.new(null);	// the instruction's immediates, positioned at the first
+	def instance() -> Instance;
+	def pop(t: ValueType) -> Value;
+	def push(v: Value);
+	def popi() -> i32 { return Values.unbox_i(pop(ValueType.I32)); }
+	def pushi(v: i32) { push(Value.I32(u32.view(v))); }
+}

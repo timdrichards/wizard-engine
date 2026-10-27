@@ -4097,13 +4097,13 @@ class X86_64InterpreterGen(ic: X86_64InterpreterCode, w: DataWriter) {
 		w.atEnd();
 		return;
 	}
-	// Handlers for extension opcodes (see InstrExtension.v3): each calls runtime_EXT,
+	// Handlers for extension opcodes (subtypes of Opcode): each calls runtime_EXT,
 	// which runs the extension's interpret hook. Nothing is generated without extensions.
 	def genExtHandlers() {
 		for (ext in Opcodes.ext_opcodes) {
 			if (FastIntTuning.handlerAlignment > 1) w.align(FastIntTuning.handlerAlignment);
-			patchDispatchTableAt(ext.placed_prefix, ext.placed_code, w.atEnd().pos);
-			if (ext.placed_prefix == 0) computeCurIpFromIp(-1); // prefixed: set by the prefix stub
+			patchDispatchTableAt(ext.prefix, Opcodes.codeOf(ext), w.atEnd().pos);
+			if (ext.prefix == 0) computeCurIpFromIp(-1); // prefixed: set by the prefix stub
 			computePcFromCurIp();
 			masm.emit_get_curstack(xenv.tmp1);
 			saveCallerIVars();

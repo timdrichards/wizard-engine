@@ -243,10 +243,8 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 		while (codeptr.pos < codeptr.limit) {
 			opcode_pos = codeptr.pos;
 			var opcode = codeptr.read_opcode();
-			if (opcode == Opcode.EXT) { // an extension opcode that replaced an end validates as end
-				var ext = codeptr.ext_opcode_at(opcode_pos);
-				if (ext != null && ext.endsBlock()) opcode = Opcode.END;
-			}
+			// An extension opcode that replaced an end validates as end.
+			if (Opcodes.isExt(opcode) && opcode.endsBlock()) opcode = Opcode.END;
 			if (probe != null) probe(this, opcode_pos, opcode);
 			if (Trace.validation) { traceOpcode(); traceStack(true); }
 			// FAST: Handle short operators (predictable direct branch)
@@ -393,7 +391,7 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 							ctlxfer.bind(ctl, opcode_pos, ctlxfer.sidetable.length);
 						}
 					}
-					if (ctl.ext != null) ctl.ext.onEnd(this, opcode_pos);
+					if (ctl.ext != Opcode.INVALID) ctl.ext.onEnd(this, opcode_pos);
 					resetInit();
 					ctl_stack.pop();
 					if (validatingInitExpr && ctl_stack.empty()) { // END finished the init expr
@@ -1385,27 +1383,21 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 					codeptr.at(opcode_pos);
 					err_atpc().InvalidOpcode(codeptr.read1(), codeptr.read_uleb32());
 				}
-				EXT => {
-					var ext = codeptr.ext_opcode_at(opcode_pos);
-					if (ext == null) {
-						codeptr.at(opcode_pos);
-						return err_atpc().InvalidOpcode(codeptr.read1(), codeptr.read_uleb32());
-					}
-					if (ext.sig != null) checkSignature(ext.sig);
-					var start = codeptr.pos;
-					if (ext.opensBlock()) {
-						var bt = parser.readBlockType();
-						var ctl = checkArgsAndPushControl(Opcode.BLOCK, bt.0, bt.1);
-						ctl.ext = ext;
-						codeptr.at(start);
-					}
-					if (!ext.validate(this)) return;
-					// Continue after the immediates, whatever the hook read.
-					codeptr.at(start);
-					codeptr.skip_immediates(ext.imms);
-				}
 				_ => {
-					if (opcode.sig != null) {
+					if (Opcodes.isExt(opcode)) {
+						if (opcode.sig != null) checkSignature(opcode.sig);
+						var start = codeptr.pos;
+						if (opcode.opensBlock()) {
+							var bt = parser.readBlockType();
+							var ctl = checkArgsAndPushControl(Opcode.BLOCK, bt.0, bt.1);
+							ctl.ext = opcode;
+							codeptr.at(start);
+						}
+						if (!opcode.validate(this)) return;
+						// Continue after the immediates, whatever the hook read.
+						codeptr.at(start);
+						codeptr.skip_immediates(opcode.imms);
+					} else if (opcode.sig != null) {
 						checkSignature(opcode.sig);
 						if (Trace.validation) traceStack(false);
 					} else {
@@ -1795,29 +1787,28 @@ class CodeValidator(extensions: Extension.set, limits: Limits, module: Module, e
 		ctl.else_ref = -1;
 		ctl.undo_init_list = null;
 		ctl.handler_dest_id = -1;
-		ctl.ext = null;
+		ctl.ext = Opcode.INVALID;
 		return ctl;
 	}
 	// Tell extension instructions whose blocks a branch to label {depth} leaves.
 	def checkBranchOut(depth: u32) -> bool {
 		for (i < int.!(depth)) {
 			var ctl = ctl_stack.elems[ctl_stack.top - i - 1];
-			if (ctl.ext != null && !ctl.ext.onBranchOut(this)) return false;
+			if (ctl.ext != Opcode.INVALID && !ctl.ext.onBranchOut(this)) return false;
 		}
 		return true;
 	}
-	// The innermost enclosing block opened by an instruction of {owner}, or null.
-	def enclosingExt(owner: InstrExtension) -> ExtOpcode {
+	// True if the code is inside a block opened by {op}.
+	def inBlockOf(op: Opcode) -> bool {
 		for (i = ctl_stack.top - 1; i >= 0; i--) {
-			var ext = ctl_stack.elems[i].ext;
-			if (ext != null && ext.owner == owner) return ext;
+			if (ctl_stack.elems[i].ext == op) return true;
 		}
-		return null;
+		return false;
 	}
 	// Replace the one-byte instruction at {pos} with the one-byte extension opcode {op}.
-	def rewriteOpcode(pos: int, op: ExtOpcode) -> bool {
-		if (op.placed_prefix != 0) return false;
-		codeptr.data[pos] = byte.view(op.placed_code);
+	def rewriteOpcode(pos: int, op: Opcode) -> bool {
+		if (op.prefix != 0) return false;
+		codeptr.data[pos] = byte.view(Opcodes.codeOf(op));
 		return true;
 	}
 	def getControl(depth: u32) -> ControlEntry {
@@ -1879,7 +1870,7 @@ private enum InitStatus {
 }
 // An entry in the control stack, exposed guts.
 class ControlEntry {
-	var ext: ExtOpcode;		// the extension instruction that opened this block, if any
+	var ext: Opcode;		// the extension opcode that opened this block, or INVALID
 	var start_pos: int;
 	var delegate_pos: int;
 	var start_opcode: u16;

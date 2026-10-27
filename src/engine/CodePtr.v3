@@ -12,17 +12,6 @@ class CodePtr extends DataReader {
 		if (op != Opcode.INVALID) return op;
 		return if(Opcodes.isPrefix(b), Opcodes.find(b, read_uleb32()));
 	}
-	// Decode the extension opcode that starts at {start}, without moving the position.
-	// Returns null if the bytes there are not an extension opcode.
-	def ext_opcode_at(start: int) -> ExtOpcode {
-		var save = pos, r: ExtOpcode;
-		at(start);
-		var b = read1();
-		if (Opcodes.opcodes_no_prefix[b] == Opcode.EXT) r = Opcodes.ext_no_prefix[b];
-		else if (Opcodes.isPrefix(b)) r = Opcodes.findExt(b, read_uleb32());
-		at(save);
-		return r;
-	}
 	def read_opcode_but_skip_probe(func: FuncDecl) -> Opcode {
 		var pc = pos, b = read1();
 		if (b == InternalOpcode.PROBE.code || b == InternalOpcode.WHAMM_PROBE.code) b = func.orig_bytecode[pc];
@@ -271,17 +260,9 @@ class CodePtr extends DataReader {
 		}
 	}
 	def read_opcode_and_skip(func: FuncDecl) -> Opcode {
-		var start = pos;
 		var opcode = read_opcode_but_skip_probe(func);
-		skip_immediates_of(opcode, start);
+		skip_immediates(opcode.imms);
 		return opcode;
-	}
-	// Skip the immediates of {opcode}, which started at {start}. An extension opcode's
-	// immediates are those of its {ExtOpcode}.
-	def skip_immediates_of(opcode: Opcode, start: int) {
-		if (opcode != Opcode.EXT) return skip_immediates(opcode.imms);
-		var ext = ext_opcode_at(start);
-		if (ext != null) skip_immediates(ext.imms);
 	}
 	def dup() -> CodePtr {
 		return CodePtr.new(null).reset(data, pos, limit);

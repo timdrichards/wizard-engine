@@ -616,10 +616,32 @@ enum Opcode(prefix: u8, code: u16, mnemonic: string, imms: Array<ImmKind>, sig: 
 	RESUME_THROW_REF		(0x00, 0xE5, "resume_throw_ref", imm.CONT_HANDLE, null),
 	SWITCH				(0x00, 0xE6, "switch", imm.CONT_TAG, null),
 
-	// An instruction contributed by an extension (see InstrExtension.v3). Never placed in
-	// the tables by {Opcodes.init}; {Opcodes.findExt} returns the slot's {ExtOpcode}.
-	// Kept last so that adding it does not change the tags of the cases above.
-	EXT				(0x00, 0xFF, "<ext>", imm.NONE, null)
+	// Open: an instruction set extension adds cases in its own subtype enum,
+	// `enum Opcode.<Name> { ... }` in src/ext/<name>/, compiled with build.sh --ext=<name>.
+	// Each case overrides the hooks it needs. See ideas/Extensions.md.
+	_;
+
+	// Extension hooks. The core handles its own opcodes and never calls these for them.
+	// Validation beyond the signature, which the validator checks first unless {sig} is
+	// null (then this hook pops and pushes with {v.popE} and {v.push}). Immediates are read
+	// with {v.parser}, positioned just after the opcode; errors go to {v.err_atpc()}.
+	def validate(v: CodeValidator) -> bool { return true; }
+	// The reference semantics: read immediates from {f.imm}, pop arguments from {f}, push
+	// results, and return {TrapReason.NONE}, or the reason to trap.
+	def interpret(f: ExtFrame) -> TrapReason { return TrapReason.UNIMPLEMENTED; }
+	// Present this instruction to a bytecode visitor.
+	def accept(v: BytecodeVisitor) { v.visitExt(this); }
+	// True for an internal one-byte instruction placed in any free slot; its encoding is
+	// then {Opcodes.codeOf(this)}, not {code}.
+	def isFloating() -> bool { return false; }
+	// Block-shaped instructions: the first immediate is a block type and the validator opens
+	// a block, closed by an ordinary end. {onEnd} may rewrite that end ({v.rewriteOpcode});
+	// {onBranchOut} is called for br, br_if, br_table and return that leave the block; an
+	// instruction that replaced an end returns true from {endsBlock}.
+	def opensBlock() -> bool { return false; }
+	def onEnd(v: CodeValidator, pos: int) { }
+	def onBranchOut(v: CodeValidator) -> bool { return true; }
+	def endsBlock() -> bool { return false; }
 }
 
 // Enumeration of the different kinds of immediates to opcodes.
@@ -737,7 +759,6 @@ class OpcodePage(prefix: byte) {
 	private def valid = Array<u32>.new(8);  // bitmap for valid
 	def opcodes = Array<Opcode>.new(256);
 	def subpages = Array<OpcodePage>.new(256);
-	private var ext: Array<ExtOpcode>;  // extension opcodes, where {opcodes[i] == Opcode.EXT}
 	var oneByte = true;
 	var numSubPages: int;
 
@@ -777,29 +798,15 @@ class OpcodePage(prefix: byte) {
 	}
 	// Place an extension opcode at {code}. Returns null on success, or the mnemonic of
 	// the opcode that already occupies the slot.
-	def putExt(op: ExtOpcode, code: u32) -> string {
+	def placeAt(op: Opcode, code: u32) -> string {
 		var p = getPage(code);
 		var page = p.0, slot = p.1;
 		var existing = page.opcodes[slot];
-		if (existing == Opcode.EXT) return page.ext[slot].mnemonic;
 		if (existing != Opcode.INVALID) return existing.mnemonic;
-		if (page.ext == null) page.ext = Array<ExtOpcode>.new(256);
-		page.opcodes[slot] = Opcode.EXT;
-		page.ext[slot] = op;
+		page.opcodes[slot] = op;
 		page.valid[slot >> 5] |= 1u << u5.view(slot);
 		if (prefix != 0 && code >= 128) oneByte = false; // need full LEB decoding for this page
 		return null;
-	}
-	// Get the extension opcode at {code}, or null if there is none.
-	def getExt(code: u32) -> ExtOpcode {
-		var page = this;
-		var upper = byte.view(code >> 8);
-		if (upper != 0) {
-			page = subpages[byte.view(code)];
-			if (page == null) return null;
-		}
-		if (page.ext == null) return null;
-		return page.ext[if(upper == 0, byte.view(code), upper)];
 	}
 	def lookupPage(code: u32) -> (OpcodePage, byte) {
 		var upper = byte.view(code >> 8);
@@ -842,14 +849,16 @@ component Opcodes {
 	def var num_subpages: int;
 	private var nameMap: HashMap<string, Opcode>;
 
-	// Extension opcodes without a prefix, where {opcodes_no_prefix[i] == Opcode.EXT}.
-	def ext_no_prefix = Array<ExtOpcode>.new(256);
-	// Every placed extension opcode, for tiers that bind a handler to each encoding.
-	def var ext_opcodes = Array<ExtOpcode>.new(0);
+	// The last core opcode: every case after it belongs to an extension.
+	def LAST_CORE_TAG = Opcode.SWITCH.tag;
+	// Every extension opcode, for tiers that bind a handler to each encoding.
+	def var ext_opcodes = Array<Opcode>.new(0);
+	// The one-byte code of each FLOATING extension opcode, by tag.
+	def floating_code = Array<byte>.new(Opcode.count);
 
 	new() {
 		for (op in Opcode) {
-			if (op == Opcode.INVALID || op == Opcode.EXT) continue;
+			if (op == Opcode.INVALID || isExt(op)) continue;
 			init(op);
 		}
 		attributes[Opcode.INVALID.tag] = OpcodeAttribute.INTERNAL;
@@ -867,40 +876,40 @@ component Opcodes {
 		for (op in [Opcode.I32_ADD, Opcode.I32_SUB, Opcode.I32_MUL, Opcode.I64_ADD, Opcode.I64_SUB, Opcode.I64_MUL]) {
 			attributes[op.tag] |= OpcodeAttribute.EXTENDED_CONSTANT;
 		}
-		placeExtensions(RegisteredExtensions.all);
+		placeExtensions();
 	}
-	// Place the opcodes of the given extensions: every FIXED claim first, then FLOATING
-	// claims in free one-byte slots. A conflict is an error. Component initializers run
-	// at compile time, so for the registered extensions a conflict stops the build.
-	def placeExtensions(exts: Array<InstrExtension>) {
-		var ops = Array<Array<ExtOpcode>>.new(exts.length);
-		for (i < exts.length) {
-			ops[i] = exts[i].opcodes();
-			for (op in ops[i]) {
-				op.owner = exts[i];
-				if (op.claim == OpcodeClaim.FIXED) checkPlaced(op, placeFixed(op));
-			}
-		}
-		for (i < exts.length) {
-			for (op in ops[i]) {
-				if (op.claim == OpcodeClaim.FLOATING) checkPlaced(op, placeFloating(op));
-			}
-		}
-		for (i < exts.length) ext_opcodes = Arrays.concat(ext_opcodes, ops[i]);
+	// True if {op} is an extension opcode, i.e. a case of a subtype of {Opcode}.
+	def isExt(op: Opcode) -> bool {
+		return op.tag > LAST_CORE_TAG;
 	}
-	private def checkPlaced(op: ExtOpcode, error: string) {
-		if (error == null) return;
-		var owner = if(op.owner != null, op.owner.name, "?");
-		System.error("ExtOpcodeError", Strings.format3("%s (extension %s): %s", op.mnemonic, owner, error));
+	// The code of {op} in its page: the declared code, or the placed one if it floats.
+	def codeOf(op: Opcode) -> u16 {
+		return if(op.isFloating(), floating_code[op.tag], op.code);
+	}
+	// Place every extension opcode: fixed encodings first, then floating ones in free
+	// one-byte slots. A conflict is an error. Component initializers run at compile time,
+	// so a conflict stops the build.
+	def placeExtensions() {
+		var exts = Vector<Opcode>.new();
+		for (op in Opcode) {
+			// A build without extensions still has the open enum's placeholder case.
+			if (isExt(op) && op.mnemonic != null) exts.put(op);
+		}
+		for (i < exts.length) if (!exts[i].isFloating()) checkPlaced(exts[i], placeFixed(exts[i]));
+		for (i < exts.length) if (exts[i].isFloating()) checkPlaced(exts[i], placeFloating(exts[i]));
+		ext_opcodes = exts.extract();
+	}
+	private def checkPlaced(op: Opcode, error: string) {
+		if (error != null) System.error("ExtOpcodeError", Strings.format2("%s: %s", op.mnemonic, error));
 	}
 	// Place {op} at exactly its prefix and code. Returns null on success, or an error message.
-	def placeFixed(op: ExtOpcode) -> string {
+	def placeFixed(op: Opcode) -> string {
 		if (op.prefix == 0) {
 			if (op.code > 0xFF) return "one-byte opcode out of range";
 			var b = byte.view(op.code);
 			var used = slotUser(b);
 			if (used != null) return Strings.format1("slot already used by %s", used);
-			setNoPrefix(op, b);
+			opcodes_no_prefix[b] = op;
 			return null;
 		}
 		var page = page_by_prefix[op.prefix];
@@ -911,20 +920,19 @@ component Opcodes {
 			if (used != null) return Strings.format2("prefix 0x%x is already used by %s", op.prefix, used);
 			page = addExtPage(op.prefix);
 		}
-		var used = page.putExt(op, op.code);
+		var used = page.placeAt(op, op.code);
 		if (used != null) return Strings.format1("slot already used by %s", used);
 		var c = op.code + 1u31;
 		if (c > largestPage) largestPage = c;
-		op.placed_prefix = op.prefix;
-		op.placed_code = op.code;
 		return null;
 	}
 	// Place {op} in the first free one-byte slot. Returns null on success, or an error message.
-	def placeFloating(op: ExtOpcode) -> string {
+	def placeFloating(op: Opcode) -> string {
 		for (i < 256) {
 			var b = byte.view(i);
 			if (slotUser(b) != null) continue;
-			setNoPrefix(op, b);
+			opcodes_no_prefix[b] = op;
+			floating_code[op.tag] = b;
 			return null;
 		}
 		return "no free one-byte opcode left";
@@ -932,17 +940,10 @@ component Opcodes {
 	// Describe what uses the one-byte slot {b}, or return null if it is free.
 	def slotUser(b: byte) -> string {
 		var op = opcodes_no_prefix[b];
-		if (op == Opcode.EXT) return ext_no_prefix[b].mnemonic;
 		if (op != Opcode.INVALID) return op.mnemonic;
 		if (page_by_prefix[b] != null) return "a prefix";
 		if (isInternal(b)) return "an internal opcode";
 		return null;
-	}
-	private def setNoPrefix(op: ExtOpcode, b: byte) {
-		opcodes_no_prefix[b] = Opcode.EXT;
-		ext_no_prefix[b] = op;
-		op.placed_prefix = 0;
-		op.placed_code = b;
 	}
 	private def addExtPage(prefix: byte) -> OpcodePage {
 		var page = page_by_prefix[prefix] = OpcodePage.new(prefix);
@@ -951,12 +952,6 @@ component Opcodes {
 		pages[code_pages.length] = page;
 		code_pages = pages;
 		return page;
-	}
-	// Look up the extension opcode at ({prefix}, {code}), or null if there is none.
-	def findExt(prefix: byte, code: u32) -> ExtOpcode {
-		if (prefix == 0) return if(code <= 0xFF, ext_no_prefix[byte.view(code)]);
-		var page = page_by_prefix[prefix];
-		return if(page != null, page.getExt(code));
 	}
 	def init(opcode: Opcode) {
 		if (opcode.mnemonic.length > longestName) longestName = opcode.mnemonic.length;
@@ -1006,7 +1001,8 @@ component Opcodes {
 		if (nameMap == null) {
 			nameMap = Strings.newMap<Opcode>();
 			for (op in Opcode) {
-				if (op != Opcode.SELECT_T) nameMap[op.mnemonic] = op;
+				// Skip the open enum's placeholder case, which has no mnemonic.
+				if (op != Opcode.SELECT_T && op.mnemonic != null) nameMap[op.mnemonic] = op;
 			}
 		}
 		return nameMap[str];

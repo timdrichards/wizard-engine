@@ -18,7 +18,7 @@ class BytecodeVisitor {
 	def visitOp(op: Opcode) 			{ }
 	// An instruction contributed by an extension. Visitors that need only its stack
 	// effect can read {op.sig}; the default treats it like any other operator.
-	def visitExt(op: ExtOpcode)			{ visitOp(Opcode.EXT); }
+	def visitExt(op: Opcode)			{ visitOp(op); }
 	def visitConst(op: Opcode)			{ visitOp(op); }
 	def visitMisc(op: Opcode) 			{ visitOp(op); }
 	def visitControl(op: Opcode) 			{ visitOp(op); }
