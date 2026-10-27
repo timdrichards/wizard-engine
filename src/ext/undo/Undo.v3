@@ -15,41 +15,28 @@
 // checkpoint trap. Writes are seen through Memory's write observer: per write in the v3
 // interpreter, and per page on native memories, where compiled code and the fast
 // interpreter store directly and page protection catches the first write to each page.
-class UndoExtension extends InstrExtension {
-	new() super("undo", "undo checkpoints for memory 0 (proof of concept)") { }
-	def opcodes() -> Array<ExtOpcode> {
-		return [UndoBegin.new(), UndoCommit.new(), UndoRollback.new(), UndoDepth.new()];
-	}
-}
+enum Opcode.Undo {
+	BEGIN(0xF9, 0x00, "undo.begin", ImmSigs.NONE, SigCache.v_v) {
+		def interpret(f: ExtFrame) -> TrapReason { return UndoLogs.of(f.instance()).begin(); }
+	},
+	COMMIT(0xF9, 0x01, "undo.commit", ImmSigs.NONE, SigCache.v_v) {
+		def interpret(f: ExtFrame) -> TrapReason { return UndoLogs.of(f.instance()).commit(); }
+	},
+	ROLLBACK(0xF9, 0x02, "undo.rollback", ImmSigs.NONE, SigCache.v_v) {
+		def interpret(f: ExtFrame) -> TrapReason { return UndoLogs.of(f.instance()).rollback(); }
+	},
+	DEPTH(0xF9, 0x03, "undo.depth", ImmSigs.NONE, SigCache.v_i) {
+		def interpret(f: ExtFrame) -> TrapReason {
+			f.pushi(UndoLogs.of(f.instance()).depth());
+			return TrapReason.NONE;
+		}
+	};
 
-// The undo instructions share a prefix and a validation rule.
-class UndoOp extends ExtOpcode {
-	new(code: u16, mnemonic: string, sig: SigDecl)
-		super(0xF9, code, mnemonic, ImmSigs.NONE, sig, OpcodeClaim.FIXED) { }
 	// Every undo instruction acts on memory 0, so the module must have one.
 	def validate(v: CodeValidator) -> bool {
 		if (v.module.memories.length > 0) return true;
 		v.err_atpc().OobIndex("memory", 0, 0);
 		return false;
-	}
-}
-class UndoBegin extends UndoOp {
-	new() super(0x00, "undo.begin", SigCache.v_v) { }
-	def interpret(f: ExtFrame) -> TrapReason { return UndoLogs.of(f.instance()).begin(); }
-}
-class UndoCommit extends UndoOp {
-	new() super(0x01, "undo.commit", SigCache.v_v) { }
-	def interpret(f: ExtFrame) -> TrapReason { return UndoLogs.of(f.instance()).commit(); }
-}
-class UndoRollback extends UndoOp {
-	new() super(0x02, "undo.rollback", SigCache.v_v) { }
-	def interpret(f: ExtFrame) -> TrapReason { return UndoLogs.of(f.instance()).rollback(); }
-}
-class UndoDepth extends UndoOp {
-	new() super(0x03, "undo.depth", SigCache.v_i) { }
-	def interpret(f: ExtFrame) -> TrapReason {
-		f.pushi(UndoLogs.of(f.instance()).depth());
-		return TrapReason.NONE;
 	}
 }
 

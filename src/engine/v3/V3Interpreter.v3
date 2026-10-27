@@ -1399,19 +1399,14 @@ class V3Interpreter extends WasmStack {
 				suspend_pc = frame.pc;
 			}
 			INVALID => trap(TrapReason.INVALID_OPCODE);
-			EXT => {
-				var ext = codeptr.ext_opcode_at(pc);
-				if (ext == null) {
-					trap(TrapReason.INVALID_OPCODE);
-				} else {
-					if (extFrame == null) extFrame = V3ExtFrame.new(this);
-					var start = codeptr.pos;
-					extFrame.imm.reset(codeptr.data, start, codeptr.limit);
-					var reason = ext.interpret(extFrame);
-					codeptr.at(start);
-					codeptr.skip_immediates(ext.imms);
-					if (reason != TrapReason.NONE) trap(reason);
-				}
+			_ => { // an extension opcode
+				if (extFrame == null) extFrame = V3ExtFrame.new(this);
+				var start = codeptr.pos;
+				extFrame.imm.reset(codeptr.data, start, codeptr.limit);
+				var reason = opcode.interpret(extFrame);
+				codeptr.at(start);
+				codeptr.skip_immediates(opcode.imms);
+				if (reason != TrapReason.NONE) trap(reason);
 			}
 // TODO: Uncomment the default case when there is an unimplemented instruction.
 // YAY!			_ => {

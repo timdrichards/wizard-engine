@@ -11,6 +11,7 @@ def X_ = void(
 def test_name(t: Tester) {
 	for (op in Opcode) {
 		if (op == Opcode.SELECT_T) continue; // skip special case
+		if (op.mnemonic == null) continue; // the open enum's placeholder case
 		var got = Opcodes.findByName(op.mnemonic);
 		if (got != op) t.fail2("expected %s, got %s", op.name, got.name);
 	}
@@ -20,7 +21,7 @@ def test_parse(t: Tester) {
 	for (op in Opcode) {
 		if (op == Opcode.SELECT_T) continue; // skip special case
 		if (op == Opcode.INVALID) continue;
-		if (op == Opcode.EXT) continue;
+		if (Opcodes.isExt(op)) continue;
 		var got = Opcodes.parseName(op.mnemonic);
 		if (got != op) t.fail2("expected %s, got %s", op.name, got.name);
 	}

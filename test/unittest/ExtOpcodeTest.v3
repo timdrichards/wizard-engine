@@ -12,39 +12,31 @@ def X_ = void(
 	()
 );
 
-def newOp(prefix: u8, code: u16, mnemonic: string) -> ExtOpcode {
-	return ExtOpcode.new(prefix, code, mnemonic, ImmSigs.NONE, SigCache.v_v, OpcodeClaim.FIXED);
-}
-
-// An extension opcode placed on a fresh page reads back as Opcode.EXT with its descriptor.
+// An opcode placed on a fresh page reads back from that page. These tests place core
+// opcodes on scratch pages, so they run in every build and leave the real tables alone.
 def test_put(t: Tester) {
 	var page = OpcodePage.new(0xFA);
-	var op = newOp(0xFA, 0x01, "test.one");
-	var used = page.putExt(op, 0x01);
+	var used = page.placeAt(Opcode.NOP, 0x01);
 	if (used != null) return t.fail1("expected free slot, but used by %s", used);
 	if (!page.isValid(0x01)) return t.fail("expected slot 0x01 to be valid");
-	if (page[0x01] != Opcode.EXT) return t.fail1("expected EXT, got %s", page[0x01].name);
-	if (page.getExt(0x01) != op) return t.fail("expected getExt to return the placed opcode");
-	if (page.getExt(0x02) != null) return t.fail("expected no extension opcode at 0x02");
+	if (page[0x01] != Opcode.NOP) return t.fail1("expected nop, got %s", page[0x01].name);
 	if (page.isValid(0x02)) return t.fail("expected slot 0x02 to stay invalid");
 }
 
 // A second claim on the same slot is refused and names the first claimant.
 def test_collide_ext(t: Tester) {
 	var page = OpcodePage.new(0xFA);
-	var first = newOp(0xFA, 0x05, "test.first");
-	var second = newOp(0xFA, 0x05, "test.second");
-	page.putExt(first, 0x05);
-	var used = page.putExt(second, 0x05);
-	t.assert_string("test.first", used);
-	if (page.getExt(0x05) != first) t.fail("expected the first opcode to keep its slot");
+	page.placeAt(Opcode.NOP, 0x05);
+	var used = page.placeAt(Opcode.DROP, 0x05);
+	t.assert_string("nop", used);
+	if (page[0x05] != Opcode.NOP) t.fail("expected the first opcode to keep its slot");
 }
 
 // A claim on a slot held by a core opcode is refused and names the core opcode.
 def test_collide_core(t: Tester) {
 	var page = OpcodePage.new(0xFC);
 	page.put(Opcode.I64_ADD128);
-	var used = page.putExt(newOp(0xFC, Opcode.I64_ADD128.code, "test.clash"), Opcode.I64_ADD128.code);
+	var used = page.placeAt(Opcode.NOP, Opcode.I64_ADD128.code);
 	t.assert_string("i64.add128", used);
 	if (page[Opcode.I64_ADD128.code] != Opcode.I64_ADD128) t.fail("expected the core opcode to keep its slot");
 }
@@ -52,29 +44,28 @@ def test_collide_core(t: Tester) {
 // Codes above 0xFF go to a subpage, as core opcodes do, and need full LEB decoding.
 def test_two_byte(t: Tester) {
 	var page = OpcodePage.new(0xFA);
-	var op = newOp(0xFA, 0x0123, "test.wide");
-	var used = page.putExt(op, 0x0123);
+	var used = page.placeAt(Opcode.NOP, 0x0123);
 	if (used != null) return t.fail1("expected free slot, but used by %s", used);
-	if (page.getExt(0x0123) != op) return t.fail("expected getExt to find the opcode on its subpage");
-	if (page.getExt(0x0124) != null) return t.fail("expected no extension opcode at 0x0124");
-	if (page.getExt(0x0223) != null) return t.fail("expected no extension opcode on a missing subpage");
+	// Read through lookupPage, as the core does: OpcodePage's [code] operator reads the
+	// top-level page even for a code on a subpage (a separate, latent bug).
+	var p = page.lookupPage(0x0123);
+	if (p.0.opcodes[p.1] != Opcode.NOP) return t.fail("expected the opcode on its subpage");
 	if (page.oneByte) t.fail("expected the page to need full LEB decoding");
 }
 
-// With no registered extensions, the opcode tables are exactly the core ones.
+// With no extensions, the opcode tables are exactly the core ones.
 def test_no_extensions(t: Tester) {
-	if (RegisteredExtensions.all.length != 0) return; // only meaningful for a build without extensions
+	if (Opcodes.ext_opcodes.length != 0) return; // only meaningful for a build without extensions
 	if (Opcodes.code_pages.length != 4) return t.fail1("expected 4 code pages, got %d", Opcodes.code_pages.length);
 	for (i < 256) {
-		var b = byte.view(i);
-		if (Opcodes.opcodes_no_prefix[b] == Opcode.EXT) return t.fail1("unexpected EXT at one-byte slot 0x%x", b);
-		if (Opcodes.findExt(0, b) != null) return t.fail1("unexpected extension opcode at 0x%x", b);
+		var op = Opcodes.opcodes_no_prefix[i];
+		if (Opcodes.isExt(op)) return t.fail1("unexpected extension opcode at one-byte slot 0x%x", i);
 	}
 }
 
 // Without extensions, the bytes of an extension opcode are just an invalid opcode.
 def test_rejected_without_ext(t: CodeValidatorTester) {
-	if (RegisteredExtensions.all.length != 0) return; // only meaningful for a build without extensions
+	if (Opcodes.ext_opcodes.length != 0) return; // only meaningful for a build without extensions
 	t.sig(SigCache.v_v);
 	t.invalid(WasmError.INVALID_OPCODE, [0xFA, 0x00], 1);
 }

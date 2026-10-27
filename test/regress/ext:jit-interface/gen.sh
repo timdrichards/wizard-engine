@@ -41,6 +41,5 @@ exec $V3I -lang:fun-exprs -lang:simple-bodies -lang:descriptors \
     $WIZENG_LOC/src/engine/objmodel/boxed/*.v3 \
     $WIZENG_LOC/src/engine/v3/*.v3 \
     $WIZENG_LOC/src/util/*.v3 \
-    $WIZENG_LOC/src/ext/Registered.v3 \
     $WIZENG_LOC/test/unittest/BinBuilder.v3 \
     ./gen.main.v3 "$@"
