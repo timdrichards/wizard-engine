@@ -7,7 +7,9 @@ Two small extensions show the mechanism end to end: `undo` (checkpoints for memo
 The framework is being built twice, so the two can be compared:
 
 - **Version 1** (this document, branch `ext-v1`) uses only features Virgil has today.
-- **Version 2** (branch `ext-v2`, to come) uses open enums with per-case methods, as proposed in titzer/virgil#653. Extension instructions there are cases of `Opcode` itself.
+- **Version 2** (branch `ext-v2`, described in [ExtensionsV2.md](ExtensionsV2.md)) uses open enums with per-case methods, as proposed in titzer/virgil#653. Extension instructions there are cases of `Opcode` itself.
+
+The two are compared, with measurements, in [ExtensionsV1V2.md](ExtensionsV1V2.md).
 
 Both versions implement the same two extensions and are measured the same way. Eliot Moss's transactional Wizard (UMass) is a reference for what a real extension needs. None of its code is used.
 
