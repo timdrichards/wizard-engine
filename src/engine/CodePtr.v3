@@ -271,9 +271,17 @@ class CodePtr extends DataReader {
 		}
 	}
 	def read_opcode_and_skip(func: FuncDecl) -> Opcode {
+		var start = pos;
 		var opcode = read_opcode_but_skip_probe(func);
-		skip_immediates(opcode.imms);
+		skip_immediates_of(opcode, start);
 		return opcode;
+	}
+	// Skip the immediates of {opcode}, which started at {start}. An extension opcode's
+	// immediates are those of its {ExtOpcode}.
+	def skip_immediates_of(opcode: Opcode, start: int) {
+		if (opcode != Opcode.EXT) return skip_immediates(opcode.imms);
+		var ext = ext_opcode_at(start);
+		if (ext != null) skip_immediates(ext.imms);
 	}
 	def dup() -> CodePtr {
 		return CodePtr.new(null).reset(data, pos, limit);

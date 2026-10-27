@@ -769,7 +769,9 @@ class OpcodePage(prefix: byte) {
 			subpages[lower] = pg;
 			oneByte = false;  // subpages necessarily require LEB encoding
 			++numSubPages;
-			Opcodes.subpage_added();
+			// Count only subpages of registered pages: the fast interpreter sizes its
+			// dispatch tables by this count, and scratch pages (e.g. in tests) must not change it.
+			if (Opcodes.page_by_prefix[prefix] == this) Opcodes.subpage_added();
 		}
 		return (pg, upper);
 	}
@@ -840,9 +842,6 @@ component Opcodes {
 	def var num_subpages: int;
 	private var nameMap: HashMap<string, Opcode>;
 
-	// The prefix page reserved for extension opcodes. It is created only when an
-	// extension claims a slot on it, so a build without extensions is unchanged.
-	def EXT_PREFIX: byte = 0xFA;
 	// Extension opcodes without a prefix, where {opcodes_no_prefix[i] == Opcode.EXT}.
 	def ext_no_prefix = Array<ExtOpcode>.new(256);
 	// Every placed extension opcode, for tiers that bind a handler to each encoding.
@@ -906,8 +905,11 @@ component Opcodes {
 		}
 		var page = page_by_prefix[op.prefix];
 		if (page == null) {
-			if (op.prefix != EXT_PREFIX) return Strings.format1("no opcode page for prefix 0x%x", op.prefix);
-			page = addExtPage();
+			// An unused byte becomes a new prefix page for this extension. A build
+			// without extensions creates none, so its tables are unchanged.
+			var used = slotUser(op.prefix);
+			if (used != null) return Strings.format2("prefix 0x%x is already used by %s", op.prefix, used);
+			page = addExtPage(op.prefix);
 		}
 		var used = page.putExt(op, op.code);
 		if (used != null) return Strings.format1("slot already used by %s", used);
@@ -921,7 +923,6 @@ component Opcodes {
 	def placeFloating(op: ExtOpcode) -> string {
 		for (i < 256) {
 			var b = byte.view(i);
-			if (b == EXT_PREFIX) continue;
 			if (slotUser(b) != null) continue;
 			setNoPrefix(op, b);
 			return null;
@@ -943,8 +944,8 @@ component Opcodes {
 		op.placed_prefix = 0;
 		op.placed_code = b;
 	}
-	private def addExtPage() -> OpcodePage {
-		var page = page_by_prefix[EXT_PREFIX] = OpcodePage.new(EXT_PREFIX);
+	private def addExtPage(prefix: byte) -> OpcodePage {
+		var page = page_by_prefix[prefix] = OpcodePage.new(prefix);
 		var pages = Array<OpcodePage>.new(code_pages.length + 1);
 		for (i < code_pages.length) pages[i] = code_pages[i];
 		pages[code_pages.length] = page;

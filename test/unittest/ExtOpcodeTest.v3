@@ -64,7 +64,6 @@ def test_two_byte(t: Tester) {
 // With no registered extensions, the opcode tables are exactly the core ones.
 def test_no_extensions(t: Tester) {
 	if (RegisteredExtensions.all.length != 0) return; // only meaningful for a build without extensions
-	if (Opcodes.page_by_prefix[Opcodes.EXT_PREFIX] != null) return t.fail("expected no extension prefix page");
 	if (Opcodes.code_pages.length != 4) return t.fail1("expected 4 code pages, got %d", Opcodes.code_pages.length);
 	for (i < 256) {
 		var b = byte.view(i);
