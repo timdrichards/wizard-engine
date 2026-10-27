@@ -33,4 +33,24 @@ class ExtOpcode(prefix: u8, code: u16, mnemonic: string, imms: Array<ImmKind>, s
 	def accept(v: BytecodeVisitor) {
 		v.visitExt(this);
 	}
+
+	// Block-shaped instructions. If true, the first immediate is a block type and the
+	// validator opens a block, closed by an ordinary {end}, as for {block}.
+	def opensBlock() -> bool {
+		return false;
+	}
+	// Called when the validator reaches the {end} at {pos} that closes a block this
+	// instruction opened. It may replace that byte with a one-byte extension opcode
+	// ({v.rewriteOpcode}) to run code at the end of the block.
+	def onEnd(v: CodeValidator, pos: int) { }
+	// True for a one-byte instruction that replaces an {end} (see {onEnd}). The validator
+	// treats it as {end} when it validates the code again.
+	def endsBlock() -> bool {
+		return false;
+	}
+	// Called for {br}, {br_if}, {br_table} and {return} that leave a block this
+	// instruction opened. Report an error and return false to forbid it.
+	def onBranchOut(v: CodeValidator) -> bool {
+		return true;
+	}
 }

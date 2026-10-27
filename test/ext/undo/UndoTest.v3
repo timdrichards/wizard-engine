@@ -56,65 +56,65 @@ def setup(i: ExeTester, sig: SigDecl) -> ExeTester {
 }
 
 def test_depth0(i: ExeTester) {
-	setup(i, SigCache.v_i).code(DEPTH);
+	setup(i, SigCache.v_i).codev(DEPTH);
 	i.noargs().assert2_i(0);
 }
 def test_depth_nested(i: ExeTester) {
-	setup(i, SigCache.v_i).code(seq([BEGIN, BEGIN, DEPTH]));
+	setup(i, SigCache.v_i).codev(seq([BEGIN, BEGIN, DEPTH]));
 	i.noargs().assert2_i(2);
 }
 def test_depth_after_commit(i: ExeTester) {
-	setup(i, SigCache.v_i).code(seq([BEGIN, COMMIT, DEPTH]));
+	setup(i, SigCache.v_i).codev(seq([BEGIN, COMMIT, DEPTH]));
 	i.noargs().assert2_i(0);
 }
 def test_rollback_store(i: ExeTester) {
-	setup(i, SigCache.v_v).code(seq([BEGIN, store32(16, 42), ROLLBACK]));
+	setup(i, SigCache.v_v).codev(seq([BEGIN, store32(16, 42), ROLLBACK]));
 	i.noargs().assert2_mem(16, ORIG);
 }
 def test_commit_store(i: ExeTester) {
-	setup(i, SigCache.v_v).code(seq([BEGIN, store32(16, 42), COMMIT]));
+	setup(i, SigCache.v_v).codev(seq([BEGIN, store32(16, 42), COMMIT]));
 	i.noargs().assert2_mem(16, [42, 0, 0, 0, 5, 6, 7, 8]);
 }
 def test_nested_inner_rollback(i: ExeTester) {
-	setup(i, SigCache.v_v).code(seq([BEGIN, store8(16, 42), BEGIN, store8(17, 43), ROLLBACK, COMMIT]));
+	setup(i, SigCache.v_v).codev(seq([BEGIN, store8(16, 42), BEGIN, store8(17, 43), ROLLBACK, COMMIT]));
 	i.noargs().assert2_mem(16, [42, 2, 3, 4, 5, 6, 7, 8]);
 }
 def test_nested_commit_outer_rollback(i: ExeTester) {
-	setup(i, SigCache.v_v).code(seq([BEGIN, BEGIN, store8(16, 42), COMMIT, ROLLBACK]));
+	setup(i, SigCache.v_v).codev(seq([BEGIN, BEGIN, store8(16, 42), COMMIT, ROLLBACK]));
 	i.noargs().assert2_mem(16, ORIG);
 }
 def test_unaligned_mixed(i: ExeTester) {
 	// An unaligned 8-byte store, then a 1-byte store inside it; rollback restores all 8 bytes.
-	setup(i, SigCache.v_v).code(seq([BEGIN,
+	setup(i, SigCache.v_v).codev(seq([BEGIN,
 		i32const(17), STORE64_M1,
 		store8(18, 42),
 		ROLLBACK]));
 	i.noargs().assert2_mem(16, ORIG);
 }
 def test_fill_rollback(i: ExeTester) {
-	setup(i, SigCache.v_v).code(seq([BEGIN,
+	setup(i, SigCache.v_v).codev(seq([BEGIN,
 		i32const(16), i32const(0), i32const(8), MEMORY_FILL,
 		ROLLBACK]));
 	i.noargs().assert2_mem(16, ORIG);
 }
 def test_fill_commit(i: ExeTester) {
-	setup(i, SigCache.v_v).code(seq([BEGIN,
+	setup(i, SigCache.v_v).codev(seq([BEGIN,
 		i32const(16), i32const(0), i32const(8), MEMORY_FILL,
 		COMMIT]));
 	i.noargs().assert2_mem(16, [0, 0, 0, 0, 0, 0, 0, 0]);
 }
 def test_copy_rollback(i: ExeTester) {
-	setup(i, SigCache.v_v).code(seq([BEGIN,
+	setup(i, SigCache.v_v).codev(seq([BEGIN,
 		i32const(16), i32const(20), i32const(4), MEMORY_COPY,
 		ROLLBACK]));
 	i.noargs().assert2_mem(16, ORIG);
 }
 def test_commit_none(i: ExeTester) {
-	setup(i, SigCache.v_v).code(COMMIT);
+	setup(i, SigCache.v_v).codev(COMMIT);
 	i.noargs().assert2_trap(TrapReason.ERROR);
 }
 def test_rollback_none(i: ExeTester) {
-	setup(i, SigCache.v_v).code(ROLLBACK);
+	setup(i, SigCache.v_v).codev(ROLLBACK);
 	i.noargs().assert2_trap(TrapReason.ERROR);
 }
 // The validate hook rejects undo instructions in a module without a memory.
@@ -127,13 +127,13 @@ def test_needs_memory(t: CodeValidatorTester) {
 def test_rollback_callee_store(i: ExeTester) {
 	setup(i, SigCache.v_v);
 	var f = i.newFunction(SigCache.v_v, store32(16, 42));
-	i.code(seq([BEGIN, [u8.!(Opcode.CALL.code), byte.!(f.func_index)], ROLLBACK]));
+	i.codev(seq([BEGIN, [u8.!(Opcode.CALL.code), byte.!(f.func_index)], ROLLBACK]));
 	i.noargs().assert2_mem(16, ORIG);
 }
 def test_commit_callee_store(i: ExeTester) {
 	setup(i, SigCache.v_v);
 	var f = i.newFunction(SigCache.v_v, store32(16, 42));
-	i.code(seq([BEGIN, [u8.!(Opcode.CALL.code), byte.!(f.func_index)], COMMIT]));
+	i.codev(seq([BEGIN, [u8.!(Opcode.CALL.code), byte.!(f.func_index)], COMMIT]));
 	i.noargs().assert2_mem(16, [42, 0, 0, 0, 5, 6, 7, 8]);
 }
 // Stores on two different OS pages (offsets 16 and 4100), rolled back together.
@@ -141,6 +141,6 @@ def test_rollback_two_pages(i: ExeTester) {
 	setup(i, SigCache.v_v);
 	var far: Array<byte> = [u8.!(Opcode.I32_CONST.code), 0x84, 0x20, u8.!(Opcode.I32_CONST.code), 42, u8.!(Opcode.I32_STORE.code), 2, 0];
 	var f = i.newFunction(SigCache.v_v, seq([store32(16, 42), far]));
-	i.code(seq([BEGIN, [u8.!(Opcode.CALL.code), byte.!(f.func_index)], ROLLBACK]));
+	i.codev(seq([BEGIN, [u8.!(Opcode.CALL.code), byte.!(f.func_index)], ROLLBACK]));
 	i.noargs().assert2_mem(16, ORIG).assert2_mem(4100, [0, 0, 0, 0]);
 }
