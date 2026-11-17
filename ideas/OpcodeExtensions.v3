@@ -1,0 +1,239 @@
+//
+// Opcode extensions: declaring new Wasm instructions outside the engine
+//
+
+// This proposal builds on ideas/TierEscape.v3, which makes an execution tier
+// able to decline an instruction instead of trapping. That one stands alone and
+// should land first; this one is unimplementable without it.
+
+
+// Motivation
+
+// Wizard exists to be experimented on, and the experiment people most often
+// want to run is "what if Wasm had this instruction?". Today that question
+// costs an edit in every execution tier, which sets the price of asking by the
+// most expensive tier rather than by the idea.
+
+// What adding one instruction touches now:
+
+//   Opcodes.v3			one row in the 584-case Opcode enum
+//   CodeValidator.v3		one arm of 122, unless the opcode is simple (below)
+//   v3/V3Interpreter.v3		one arm of 490
+//   x86-64/X86_64Interpreter.v3	hand-written assembly, in a 4391-line file
+//   compiler/SinglePassCompiler.v3	code generation, in a 3512-line file
+//   Extension.v3		one case in a closed enum, for the -ext: flag
+
+// A researcher with an idea for an atomic operation should not have to write
+// x86-64 assembly to find out whether the idea is any good. Today they either
+// do that, or their opcode does not run on the tiers anyone measures.
+
+// The goal is narrow and testable:
+
+//     An extension is one folder. It declares its opcodes and their semantics
+//     once. It runs correctly on every tier immediately, natively on the tiers
+//     it chooses to invest in, and it edits no file in src/engine/.
+
+// And one constraint that outranks elegance, because this is an engine:
+
+//     No opcode that exists today may get slower, and no dispatch may gain a
+//     branch. Extension support must be free when unused.
+
+
+// 1. What is already extensible
+
+// More than we expected. {Opcode} is not a bare enum; it is a data table:
+
+enum Opcode(prefix: u8, code: u16, mnemonic: string, imms: Array<ImmKind>, sig: SigDecl) {
+	I32_ADD		(0x00, 0x6A, "i32.add", imm.NONE, sig.ii_i),
+	// ... 583 more ...
+}
+
+// and decoding consumes it dynamically. {Opcodes}'s initializer walks the enum
+// and registers every case into 256-entry prefix pages:
+
+//	new() { for (op in Opcode) { if (op == Opcode.INVALID) continue; init(op); } }
+
+// So decoding is already driven by data rather than by code. If {Opcode} were
+// an open enum, an extension's cases would appear in the decode tables with no
+// core change whatsoever.
+
+// Validation is half-free already. The validator opens with:
+
+//	if (Opcodes.attributes[opcode.tag].SHORT_OP) { checkSignature(opcode.sig); continue; }
+//	match (opcode) { /* 122 arms for everything else */ }
+
+// where SHORT_OP is computed, not declared:
+
+//	if (opcode.sig != null && opcode.imms.length == 0) attributes[c] |= OpcodeAttribute.SHORT_OP;
+
+// An opcode with a fixed signature and no immediates therefore needs *no
+// validator code at all*. It is checked entirely from its table row, and that
+// covers most of what a new arithmetic, atomic, or SIMD proposal adds.
+
+// Decode is free and validation is usually free. The cost is execution, and it
+// is multiplied by three tiers.
+
+
+// 2. Declaration: the opcode and its semantics in one place
+
+// Virgil's open enums with per-case methods (Strategy B, see the dependency in
+// section 6) let the table carry behavior as well as data. {Opcode} gains a
+// hole and one declaration per operation, once:
+
+enum Opcode { /* ... 584 cases ... */ _;
+	// Portable semantics. Required of every opcode.
+	def execute(i: Interpreter);
+	// Native tiers, optional; default is "I decline", see section 3.
+	def compileSpc(c: SinglePassCompiler) -> bool { return false; }
+	def emitFastInt(a: X86_64MacroAssembler) -> bool { return false; }
+}
+
+// and an extension declares its opcodes in its own folder, with the semantics
+// attached to the case rather than scattered across three interpreters:
+
+enum Opcode.Tmem {
+	ATOMIC_LOAD (0xFE, 0x10, "atomic.load", imm.MEMARG, sig.i_i) {
+		def execute(i: Interpreter) { /* ... */ }
+	},
+	ATOMIC_ADD (0xFE, 0x1E, "atomic.rmw.add", imm.MEMARG, sig.ii_i) {
+		def execute(i: Interpreter) { /* ... */ }
+		def compileSpc(c: SinglePassCompiler) -> bool { /* ... */ return true; }
+	}
+}
+
+// That is the whole declaration. Decode comes from the row, validation comes
+// from the signature, semantics come from the method. Nothing is registered and
+// nothing is looked up.
+
+
+// 3. The tier contract
+
+// One rule, and it is what makes the cost of an idea proportional to the idea:
+
+//	portable semantics	required
+//	every native tier	optional, and declines by default
+
+// The defaults in section 2 return false, meaning "I did not emit code for
+// this". What happens next is each tier's business, and two of the three
+// already handle it:
+
+//   SPC		{bailout("unsupported opcode: %s")} exists today, sets
+//			success = false for that function, and the strategy falls
+//			back. Per function, not per module.
+//   V3 interpreter	its match gains a default arm calling {opcode.execute}.
+//   fast-int		escapes to Virgil and resumes -- ideas/TierEscape.v3.
+
+// An extension that implements only {execute} is therefore correct everywhere
+// and slow in the places it has not invested in. An extension that cares about
+// one tier implements that tier's method and pays nothing.
+
+
+// 4. Efficiency
+
+// Existing opcodes do not get slower, because nothing here is on a hot path:
+
+// - Decode tables are pre-allocated 256-entry pages, fully populated at startup
+//   whether or not extensions exist. An extension fills slots that currently
+//   hold the trap handler. No entry an existing opcode uses changes, and
+//   dispatch remains the same indirect jump through the same table.
+
+// - Extension opcodes validate through the SHORT_OP path that is already there.
+//   Core opcodes take the identical path they take now.
+
+// - The V3 interpreter's match gains one default arm. Its 490 existing arms
+//   compile to the same dispatch; the default is reached only by cases the
+//   interpreter does not have.
+
+// - SPC's bailout already exists and already costs nothing untaken.
+
+// - Startup work is one pass over the opcode table, which already happens.
+
+// The cost of an escaping instruction is analysed in ideas/TierEscape.v3. The
+// short version is that it lands on instructions nobody has optimized yet,
+// which is the right place for it.
+
+
+// 5. Deliberate scope: what v1 does not do
+
+// Simplicity is a requirement, so the boundary is drawn on purpose rather than
+// discovered later. Version one covers opcodes that:
+
+//   - have a fixed signature and immediates drawn from existing {ImmKind}s, and
+//   - do not transfer control.
+
+// Control flow is the exclusion that matters. Branching opcodes need sidetable
+// entries computed during validation, which is real work in {CodeValidator} and
+// {Sidetable}, and it is also what the escape in TierEscape.v3 deliberately
+// avoids. Excluding it keeps validation table-driven and the escape trivial.
+
+// This is not a small subset. Atomics, SIMD, wide arithmetic, and most
+// arithmetic or memory proposals are entirely within it.
+
+// Also out of scope: proposals that add *sections* or *types* rather than
+// instructions. Those touch {BinParser} and {ValueType} and deserve their own
+// proposal; conflating them with opcodes would double the size of this one.
+
+// A new {ImmKind} is likewise out of scope for v1. {ImmKind} is a closed enum
+// and opening it is the same exercise as opening {Opcode}, but it is not needed
+// to try out an instruction built from immediates that already exist.
+
+
+// 6. Dependency
+
+// Section 2 requires Virgil open enums *with per-case methods* -- Eliot's
+// Strategy B (PRs #652, #653). Strategy A would let an extension declare an
+// opcode row but give it nowhere to put {execute}, which puts the semantics
+// back in a table in core and defeats the purpose.
+
+// This is the second proposal to land on that dependency; see
+// virgil/doc/ideas/Extensions.v3, which needs it for the same reason inside the
+// compiler. One language feature unblocks both.
+
+
+// 7. Known hazards
+
+// - {Opcodes.attributes} is one array, sized Opcode.count, indexed two
+//   different ways: by {opcode.tag} in CodeValidator, and by raw bytecode byte
+//   in BytecodeIterator ("Opcodes.attributes[b].PROBE"). It works because
+//   {InternalOpcode}'s codes (0x16, 0x1D, 0x1E, 0xF0, 0xF1) happen not to
+//   collide meaningfully with the tags at those indices. Adding cases changes
+//   both Opcode.count and the tag numbering, so this needs a single
+//   well-defined index space before anything is added. We would rather fix this
+//   than inherit it.
+
+// - Open enums must give stable, unique tags across a hierarchy, since
+//   {attributes} and several other arrays are indexed by tag. Enum *sets* are
+//   capped at 64 cases in the open-enum design; {Opcode} has 584 and does not
+//   use sets, but the interaction should be confirmed rather than assumed.
+
+// - Opcode space is a shared global resource and two extensions can both claim
+//   0xFE 0x10. {OpcodePage.put} currently ignores a duplicate -- the error call
+//   is commented out. Extensions make collisions likely enough that this should
+//   become a real diagnostic naming both claimants.
+
+
+// 8. Order of work
+
+// 1. Give {Opcodes.attributes} a single index space (section 7). Independent of
+//    everything else here and worth doing regardless.
+// 2. Land ideas/TierEscape.v3, which is independent of Virgil and of this.
+// 3. Land open enums with per-case methods in Virgil.
+// 4. Add {execute} to {Opcode} and move the V3 interpreter's arms onto the
+//    cases incrementally, giving its match a default arm. Nothing is extensible
+//    yet and nothing should change behaviorally -- this is the refactor that
+//    proves the shape.
+// 5. Add -ext: registration for extension-declared opcodes.
+// 6. Port one real proposal. wide-arithmetic is the right first one: exactly
+//    four opcodes, every one imm.NONE with a fixed signature --
+//
+//	I64_ADD128	(0xFC, 0x13, "i64.add128",	imm.NONE, sig.llll_ll),
+//	I64_SUB128	(0xFC, 0x14, "i64.sub128",	imm.NONE, sig.llll_ll),
+//	I64_MUL_WIDE_S	(0xFC, 0x15, "i64.mul_wide_s",	imm.NONE, sig.ll_ll),
+//	I64_MUL_WIDE_U	(0xFC, 0x16, "i64.mul_wide_u",	imm.NONE, sig.ll_ll),
+//
+//    -- so all four are SHORT_OP and need no validator code, none touches
+//    control flow, and all are already implemented on every tier. It can be
+//    moved out of core and diffed against its own prior behavior.
+
+// Step 6 is the test. If a proposal we have already shipped cannot be expressed
+// as an extension without reaching back into src/engine/, the design is wrong.
