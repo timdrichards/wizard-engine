@@ -1,0 +1,183 @@
+//
+// Tier escape: executing an instruction a tier does not implement
+//
+
+// This proposal stands alone. It is also the foundation for
+// ideas/OpcodeExtensions.v3, which cannot work without it, but it is worth
+// doing on its own terms and it depends on nothing that does not exist today.
+
+
+// Motivation
+
+// Wizard has three ways to execute an instruction -- the portable V3
+// interpreter, the hand-written fast interpreter, and the single-pass compiler
+// -- and they do not implement the same set. That is normal and healthy: a
+// proposal lands in the interpreter first and is made fast later, and the
+// README's feature matrix is largely a record of which tier has caught up.
+
+// What is missing is a uniform answer to "this tier cannot do this
+// instruction". Today there are three different answers:
+
+//   SPC		bails out per function and falls back. Good.
+//   V3 interpreter	a match arm; a missing one is a compile error. Fine.
+//   fast-int		traps INVALID_OPCODE, which is wrong, and is also the
+//			only thing it can do.
+
+// Fast-int's dispatch tables are filled with a single default handler that
+// traps, and slots are then overwritten for implemented opcodes. An opcode that
+// is valid but unimplemented lands in a trap slot and the program dies with a
+// diagnosis that is not true -- the opcode is not invalid, this tier just does
+// not know it.
+
+// Nor can fast-int fall back the way SPC does. On x86-64 the V3 interpreter is
+// not compiled into the engine at all: build.sh selects TARGET_X86_64 *or*
+// TARGET_V3, never both. There is no slower tier underneath to drop to.
+
+// So an instruction fast-int does not implement has to be executed sideways --
+// out to Virgil and back -- or not at all.
+
+
+// The mechanism already exists
+
+// It is how probes work. A probe stops fast-int at an arbitrary bytecode, calls
+// into Virgil with access to the frame, and resumes:
+
+//	def runtime_PROBE_instr(stack: X86_64Stack, func: WasmFunction, pc: int) -> Throwable {
+//		var frame = TargetFrame(stack.rsp + Pointer.SIZE);
+//		var ret = Instrumentation.fireLocalProbes(DynamicLoc(func, pc, frame));
+//		if (ret != null) return ThrowResult.Unhandled.!(stack.throw(ret)).thrown;
+//		return ret;
+//	}
+
+// Everything an escape needs is in those five lines: a frame to read and write,
+// and a {Throwable} return that means "trap or throw" when non-null and
+// "resume" when null. An escape handler is the same shape:
+
+//	def runtime_ESCAPE(stack: X86_64Stack, func: WasmFunction, pc: int) -> Throwable {
+//		var frame = TargetFrame(stack.rsp + Pointer.SIZE);
+//		return Escapes.execute(func, pc, frame);
+//	}
+
+// Installing it is a one-line change in table construction. {genOpcodeHandlers}
+// already computes exactly one default position and writes it into every slot
+// of every page before overwriting the implemented ones. Slots for opcodes that
+// are valid-but-unimplemented get the escape handler's address instead of the
+// trap's. Every implemented slot is untouched.
+
+
+// What is deliberately not needed
+
+// The obvious way to build this would be a deopt: reconstruct interpreter state
+// and hand the frame to another tier. Wizard has that, for SPC:
+
+//	private def deoptToInterpreter() {
+//		var map = SidetableMap.new(func);	// walks the entire function body
+//		var stp = map[pc];
+//		handle.writeInterpreterState(func, pc, stp);
+//		handle.redirectToInterpreter();
+//	}
+
+// We do not want it and must not use it. {SidetableMap}'s constructor iterates
+// the whole function to build a pc-to-sidetable map. That is acceptable for a
+// deopt, which is rare; doing it once per executed instruction would be
+// catastrophic, and the file already carries a "TODO: cache in FuncDecl?" on
+// that line.
+
+// The escape avoids it entirely, because an instruction that does not transfer
+// control does not move the sidetable position. The handler advances the ip and
+// leaves stp exactly as it found it. No map, no deopt, no tier switch, no
+// reentry point -- just a call and a return, like a probe.
+
+// This is the reason the proposal is small, and it is also the reason for the
+// scope limit below.
+
+
+// The one thing missing
+
+// {FrameWriter} can write locals and frame variables but not operands:
+
+//	def setLocal(i: int, v: Value)
+//	def setFrameVar(i: int, v: Value)
+
+// A handler that executes an instruction must consume its operands and produce
+// its results, so it needs operand access. Reading already exists --
+// {getOperand(i)} by depth, {numOperands()} from vsp minus vfp -- and so does
+// the underlying write machinery, since locals and operands live in one value
+// stack and {stack.overwriteValue} writes into it. What is absent is the API,
+// not the representation.
+
+// This is wanted independently. ideas/ProbeCapabilities.v3 already lists
+// WRITE_OPERAND and WRITE_OPERANDS as capabilities a probe may use, spelled
+// "DynamicLoc.getFrameAccessor().setOperand(#k)". A probe that can rewrite an
+// operand is useful on its own, and it is the same API.
+
+
+// Efficiency
+
+// The governing constraint is that no instruction that runs today may get
+// slower, and nothing here is on a hot path:
+
+// - Dispatch tables are 256-entry pages, allocated and fully populated at
+//   startup regardless. An escape fills slots that currently hold the trap
+//   handler's address. No entry an implemented opcode uses changes, and
+//   dispatch remains the same indirect jump through the same table. There is no
+//   new branch and no new test.
+
+// - The escape itself costs one indirect call plus a {TargetFrame}
+//   construction, paid only by instructions that had no handler at all and
+//   would otherwise have trapped. Nothing that previously ran pays it.
+
+// - No change to SPC, whose bailout already exists and already costs nothing
+//   when not taken.
+
+// An escaping instruction is perhaps two orders of magnitude slower than a
+// native handler. That is the right place for the cost -- it lands on the
+// instruction nobody has written assembly for yet, which is precisely the
+// instruction whose performance nobody is measuring.
+
+
+// Scope
+
+// This proposal covers instructions that do not transfer control. Branching
+// instructions move the sidetable position, which is the one thing the escape
+// deliberately does not touch; supporting them means reconstructing stp, which
+// means the expensive machinery above. If we later want escaping control flow,
+// it should be a separate step with its own justification, and the first move
+// would be caching {SidetableMap} in {FuncDecl} as the existing TODO suggests.
+
+
+// Hazards
+
+// - Trapping and throwing from inside an escape. The {Throwable} return
+//   protocol is right, but {stack.trap} and {stack.throw} were written against
+//   fast-int's own frame assumptions, and the escape's frame is built at a
+//   different point in the handler. This should be exercised early rather than
+//   assumed; it is the most likely place for this proposal to be wrong.
+
+// - Advancing the ip past immediates. The handler must know the encoded length
+//   of the instruction it just executed. {BytecodeIterator} already computes
+//   this, so the information exists, but the escape must use it rather than
+//   re-deriving it, or the two will drift.
+
+// - Operand writes and SPC. {FrameWriter.setLocal} today calls
+//   {deoptToInterpreter} when the frame is an SPC frame, because SPC may be
+//   holding that local in a register. Operand writes will need the same
+//   treatment, and the interaction should be settled when the API is added
+//   rather than after.
+
+
+// Order of work
+
+// 1. Add operand access to {FrameAccessor} and {FrameWriter}. Independently
+//    useful for probes; no dependency on anything else here.
+// 2. Add the escape runtime call and the ip-advance helper.
+// 3. Fill valid-but-unimplemented dispatch slots with the escape rather than
+//    the trap.
+// 4. Prove it on an opcode that already exists: pick one fast-int implements,
+//    remove its native handler behind a build flag, and check that the program
+//    still produces identical results through the escape. That is a test that
+//    can exist before any extension does.
+
+// Step 4 is worth doing even if ideas/OpcodeExtensions.v3 never happens. It
+// turns "fast-int does not support that proposal yet" from a wall into a
+// slowdown, for every proposal, for free.
